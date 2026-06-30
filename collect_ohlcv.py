@@ -42,6 +42,45 @@ _BURST_MIN = 1.0     # 긴 휴식 최솟값(초)
 _BURST_MAX = 2.5     # 긴 휴식 최댓값(초)
 
 
+def _refresh_universe(api) -> list[str]:
+    """ka10099로 코스피/코스닥 전 종목을 내려받아 universe.csv 갱신.
+
+    Returns:
+        갱신된 ticker 목록.
+    """
+    logger.info("유니버스 갱신 시작 (ka10099 코스피+코스닥)")
+    try:
+        rows = api.fetch_universe(markets=[0, 10], exclude_warning=True)
+    except Exception as e:
+        logger.warning(f"유니버스 갱신 실패, 기존 파일 유지: {e}")
+        return _load_universe()
+
+    if not rows:
+        logger.warning("유니버스 응답 비어있음, 기존 파일 유지")
+        return _load_universe()
+
+    UNIVERSE.parent.mkdir(parents=True, exist_ok=True)
+    with open(UNIVERSE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["ticker", "name", "market"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    tickers = [r["ticker"] for r in rows]
+    logger.info(f"유니버스 갱신 완료: {len(tickers)}종목 → {UNIVERSE}")
+    return tickers
+
+
+def _load_universe() -> list[str]:
+    """기존 universe.csv에서 ticker 목록 로드."""
+    tickers: list[str] = []
+    with open(UNIVERSE, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            t = (row.get("ticker") or "").strip()
+            if t:
+                tickers.append(t)
+    return tickers
+
+
 def _is_incremental() -> bool:
     """DB에 최근 데이터가 있으면 True (incremental), 없거나 오래됐으면 False (full)."""
     from broker.ohlcv_store import get_max_date
@@ -79,12 +118,7 @@ def main() -> int:
     limit = INCREMENTAL_LIMIT if incremental else FULL_LIMIT
     mode = "incremental" if incremental else "full"
 
-    tickers: list[str] = []
-    with open(UNIVERSE, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            t = (row.get("ticker") or "").strip()
-            if t:
-                tickers.append(t)
+    tickers = _refresh_universe(api)
 
     today = datetime.now().strftime("%Y%m%d")
     total = len(tickers)

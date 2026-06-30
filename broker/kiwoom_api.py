@@ -596,6 +596,69 @@ class KiwoomApi:
         result.sort(key=lambda x: x["date"])
         return result[-limit:]
 
+    def fetch_universe(
+        self,
+        markets: list[int] | None = None,
+        exclude_warning: bool = True,
+    ) -> list[dict[str, str]]:
+        """ka10099 종목정보 리스트 — 코스피/코스닥 전 종목 반환.
+
+        Args:
+            markets: 시장구분 코드 목록. 기본값 [0(코스피), 10(코스닥)]
+            exclude_warning: True 면 정리매매(orderWarning==2) 제외
+
+        Returns:
+            [{"ticker": "005930", "name": "삼성전자", "market": "코스피"}, ...]
+        """
+        if markets is None:
+            markets = [0, 10]
+
+        result: list[dict[str, str]] = []
+        for mrkt in markets:
+            cont_yn = "N"
+            next_key = ""
+            while True:
+                self._guard_rate_limit("ka10099")
+                self._respect_min_interval("ka10099")
+                resp = requests.post(
+                    f"{self._cfg.base_url}/api/dostk/stkinfo",
+                    headers=self._api_headers("ka10099", cont_yn=cont_yn, next_key=next_key),
+                    json={"mrkt_tp": str(mrkt)},
+                    timeout=10,
+                )
+                self._mark_call("ka10099")
+                if resp.status_code == 429:
+                    self._apply_rate_limit("ka10099", "http_429")
+                    raise KiwoomRateLimitError("ka10099 rate limited (HTTP 429)")
+                resp.raise_for_status()
+                data = resp.json()
+                if self._looks_like_rate_limit(data):
+                    self._apply_rate_limit("ka10099", "payload")
+                    raise KiwoomRateLimitError("ka10099 rate limited")
+
+                for item in data.get("list", []):
+                    if exclude_warning and (item.get("orderWarning") or "0") == "2":
+                        continue
+                    market_name = (item.get("marketName") or "").strip()
+                    # 일반 주식만 포함 (ETF/ETN/리츠/뮤추얼펀드 등 제외)
+                    if market_name not in ("거래소", "코스닥"):
+                        continue
+                    ticker = (item.get("code") or "").strip()
+                    if not ticker:
+                        continue
+                    result.append({
+                        "ticker": ticker,
+                        "name": (item.get("name") or "").strip(),
+                        "market": market_name,
+                    })
+
+                cont_yn = resp.headers.get("cont-yn", "N")
+                next_key = resp.headers.get("next-key", "")
+                if cont_yn != "Y" or not next_key:
+                    break
+
+        return result
+
 
 def _abs_float(value: Any) -> float:
     """부호 포함 숫자 문자열 → 절댓값 float. 예: '-78800' → 78800.0"""
