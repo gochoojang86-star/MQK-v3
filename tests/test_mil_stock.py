@@ -94,6 +94,24 @@ def test_get_intraday_candles_parses_minute_bars():
     assert result["candles"][0]["close"] == 69900.0
 
 
+def test_get_intraday_candles_force_refresh_bypasses_cache():
+    ctx = make_ctx(
+        raw_responses={
+            "FHKST03010200": {
+                "output2": [
+                    {"stck_cntg_hour": "093000", "stck_oprc": "69800", "stck_hgpr": "70000",
+                     "stck_lwpr": "69700", "stck_prpr": "69900", "cntg_vol": "5000"},
+                ],
+            },
+        },
+    )
+
+    get_intraday_candles(ctx, "INTRADAY", ticker="005930")
+    get_intraday_candles(ctx, "INTRADAY", ticker="005930", force_refresh=True)
+
+    assert len(ctx.kis_api.raw_get_calls) == 2
+
+
 def test_get_flow_parses_investor_breakdown():
     ctx = make_ctx(
         raw_responses={
@@ -368,9 +386,8 @@ def test_get_watchlist_intraday_snapshot_bundles_price_news_and_status(monkeypat
     assert [row["ticker"] for row in result["tickers"]] == ["005930", "000660"]
     assert result["tickers"][0]["price"] == 70000.0
     assert result["tickers"][0]["intraday_trend"] == "up"
-    assert result["tickers"][0]["headline_count"] == 0
-    assert result["tickers"][0]["telegram_headline_count"] == 1
-    assert "005930 속보" in result["tickers"][0]["latest_headlines"][0]
+    assert "headline_count" not in result["tickers"][0]
+    assert "latest_headlines" not in result["tickers"][0]
 
 
 def test_get_watchlist_intraday_snapshot_uses_hts_avls_for_market_cap(monkeypatch):
@@ -408,3 +425,80 @@ def test_get_watchlist_intraday_snapshot_uses_hts_avls_for_market_cap(monkeypatc
     result = get_watchlist_intraday_snapshot(ctx, "INTRADAY", ["005930"])
 
     assert result["tickers"][0]["market_cap"] == 4_200_000_000_000.0
+
+
+def _make_candle_raw(hour, open_, high, low, close, vol):
+    return {
+        "stck_cntg_hour": hour,
+        "stck_oprc": str(open_),
+        "stck_hgpr": str(high),
+        "stck_lwpr": str(low),
+        "stck_prpr": str(close),
+        "cntg_vol": str(vol),
+    }
+
+
+def _snapshot_ctx(candle_rows, monkeypatch):
+    import market_intelligence.stock as mil_stock
+    import market_intelligence.risk_filter as mil_risk_filter
+
+    monkeypatch.setattr(mil_stock, "get_recent_news", lambda ticker="", hours=2: [])
+    monkeypatch.setattr(mil_stock, "NaverNewsFetcher", type("FN", (), {"search": lambda self, q, display=5: []})())
+    monkeypatch.setattr(
+        mil_risk_filter,
+        "get_stock_status",
+        lambda ctx, phase, ticker: {
+            "trading_halted": False, "administrative_issue": False,
+            "is_limit_up": False, "is_limit_down": False, "is_vi": False,
+        },
+    )
+    return make_ctx(
+        raw_responses={
+            "FHKST11300006": {"output": [{"inter_shrn_iscd": "005930", "inter2_prpr": "70000", "prdy_ctrt": "1.0", "acml_vol": "100"}]},
+            "FHKST03010200": {"output2": candle_rows},
+            "FHKST01011800": {"output": []},
+        }
+    )
+
+
+def test_snapshot_includes_candle_count_and_recent_candles(monkeypatch):
+    candles = [
+        _make_candle_raw("090000", 69000, 70000, 68900, 69900, 5000),
+        _make_candle_raw("091000", 69900, 70500, 69800, 70400, 4000),
+        _make_candle_raw("092000", 70400, 71000, 70300, 70800, 6000),
+        _make_candle_raw("093000", 70800, 71200, 70600, 71100, 3000),
+    ]
+    ctx = _snapshot_ctx(candles, monkeypatch)
+    result = get_watchlist_intraday_snapshot(ctx, "INTRADAY", ["005930"])
+
+    row = result["tickers"][0]
+    assert row["candle_count"] == 4
+    assert len(row["recent_candles"]) == 4  # 10개 미만이면 전부 (4개 있으면 4개)
+    assert row["recent_candles"][-1] == row["latest_candle"]  # 마지막 봉 일치
+    assert "_guidance" in result  # 4개 < 10 → guidance 있음 (force_refresh 권고)
+
+
+def test_snapshot_guidance_when_thin_candles(monkeypatch):
+    candles = [
+        _make_candle_raw("090000", 69000, 70000, 68900, 69900, 5000),
+        _make_candle_raw("091000", 69900, 70500, 69800, 70400, 4000),
+    ]
+    ctx = _snapshot_ctx(candles, monkeypatch)
+    result = get_watchlist_intraday_snapshot(ctx, "INTRADAY", ["005930"])
+
+    row = result["tickers"][0]
+    assert row["candle_count"] == 2
+    assert len(row["recent_candles"]) == 2
+
+    guidance = result["_guidance"]
+    assert "005930" in guidance["thin_candles"]
+    assert "force_refresh" in guidance["hint"]
+
+
+def test_snapshot_guidance_when_no_candles(monkeypatch):
+    ctx = _snapshot_ctx([], monkeypatch)
+    result = get_watchlist_intraday_snapshot(ctx, "INTRADAY", ["005930"])
+
+    assert result["tickers"][0]["candle_count"] == 0
+    assert result["tickers"][0]["recent_candles"] == []
+    assert "005930" in result["_guidance"]["thin_candles"]

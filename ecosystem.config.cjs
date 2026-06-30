@@ -142,6 +142,16 @@ module.exports = {
     //   restart_delay: 3000,
     // },
     {
+      name: "mqk-ohlcv-collect",
+      script: "/mnt/c/Users/gocho/MQK-v2/.venv/bin/python",
+      args: "/mnt/c/Users/gocho/MQK-v2/collect_ohlcv.py",
+      cwd: "/mnt/c/Users/gocho/MQK-v2",
+      // KST 19:00 평일 — 종가 확정(15:30) 후 충분한 여유를 두고 실행.
+      // 전 종목 60일치 수집 약 23분 소요. 완료 후 프로세스 종료.
+      cron_restart: "0 19 * * 1-5",
+      autorestart: false,
+    },
+    {
       name: "mqk-telegram-news",
       script: "/mnt/c/Users/gocho/MQK-v2/.venv/bin/python",
       args: "-m broker.telegram_news",

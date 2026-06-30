@@ -432,24 +432,42 @@ class KiwoomApi:
             },
         )
 
-    def volume_surge(self, mrkt_tp: str = "000") -> dict[str, Any]:
-        """ka10023 거래량급증요청."""
-        return self._rest_request("ka10023", "/api/dostk/rkinfo", {"mrkt_tp": mrkt_tp})
+    def volume_surge(
+        self,
+        mrkt_tp: str = "000",
+        sort_tp: str = "1",
+        tm_tp: str = "30",
+        trde_qty_tp: str = "0",
+        stk_cnd: str = "0",
+        pric_tp: str = "0",
+        stex_tp: str = "1",
+    ) -> dict[str, Any]:
+        """ka10023 거래량급증요청.
+
+        sort_tp: "1"=급증률순, "2"=급증수량순.
+        tm_tp: 기준 시간(분) "30"|"60"|"120".
+        응답 키: trde_qty_sdnin (list).
+        """
+        return self._rest_request(
+            "ka10023",
+            "/api/dostk/rkinfo",
+            {
+                "mrkt_tp": mrkt_tp,
+                "sort_tp": sort_tp,
+                "tm_tp": tm_tp,
+                "trde_qty_tp": trde_qty_tp,
+                "stk_cnd": stk_cnd,
+                "pric_tp": pric_tp,
+                "stex_tp": stex_tp,
+            },
+        )
 
     def intraday_investor_rank(self, trde_tp: str) -> dict[str, Any]:
         """ka10065 장중투자자별매매상위요청. trde_tp: 1=기관, 2=외국인, 3=개인."""
         return self._rest_request("ka10065", "/api/dostk/rkinfo", {"trde_tp": trde_tp})
 
     def intraday_candles(self, ticker: str, tic_scope: str = "1") -> dict[str, Any]:
-        """ka10080 주식분봉차트조회요청 - 당일 분봉 데이터 조회.
-
-        Args:
-            ticker: 종목코드 (예: "005930")
-            tic_scope: 틱범위 (1=1분, 3=3분, 5=5분, 10=10분, 15=15분, 30=30분, 45=45분, 60=60분)
-
-        Returns:
-            {"stk_min_pole_chart_qry": [{"cntr_tm": "...", "cur_prc": ..., "trde_qty": ...}, ...]}
-        """
+        """ka10080 주식분봉차트조회요청 - 당일 최근 분봉 (단일 호출, 약 30봉)."""
         return self._rest_request(
             "ka10080",
             "/api/dostk/chart",
@@ -459,6 +477,139 @@ class KiwoomApi:
                 "upd_stkpc_tp": "1",
             },
         )
+
+    def intraday_candles_full_day(
+        self, ticker: str, base_dt: str | None = None, tic_scope: str = "1"
+    ) -> list[dict[str, Any]]:
+        """ka10080 당일 전체 분봉 — 연속조회로 장 시작부터 현재까지 전부 반환.
+
+        Returns:
+            [{"time": "HHmm", "open": ..., "high": ..., "low": ..., "close": ..., "volume": ...}]
+            날짜 오름차순 (오래된 것 먼저).
+        """
+        from datetime import datetime as _dt
+
+        base_dt = base_dt or _dt.now().strftime("%Y%m%d")
+        candles: list[dict[str, Any]] = []
+        cont_yn = "N"
+        next_key = ""
+
+        for _ in range(20):  # 1분봉 최대 ~370개 → 페이지 수 여유롭게
+            self._guard_rate_limit("ka10080")
+            self._respect_min_interval("ka10080")
+            resp = requests.post(
+                f"{self._cfg.base_url}/api/dostk/chart",
+                headers=self._api_headers("ka10080", cont_yn=cont_yn, next_key=next_key),
+                json={"stk_cd": ticker, "tic_scope": tic_scope, "upd_stkpc_tp": "1", "base_dt": base_dt},
+                timeout=10,
+            )
+            self._mark_call("ka10080")
+            if resp.status_code == 429:
+                self._apply_rate_limit("ka10080", "http_429")
+                raise KiwoomRateLimitError(f"ka10080 rate limited (HTTP 429)")
+            resp.raise_for_status()
+            data = resp.json()
+            if self._looks_like_rate_limit(data):
+                self._apply_rate_limit("ka10080", "payload")
+                raise KiwoomRateLimitError("ka10080 rate limited")
+
+            added_today = 0
+            for r in data.get("stk_min_pole_chart_qry", []):
+                raw_time = (r.get("cntr_tm") or "")
+                if raw_time[:8] != base_dt:  # 오늘 날짜 아닌 봉 제외
+                    continue
+                candles.append({
+                    "time": raw_time[8:12],
+                    "open": _abs_float(r.get("open_pric")),
+                    "high": _abs_float(r.get("high_pric")),
+                    "low": _abs_float(r.get("low_pric")),
+                    "close": _abs_float(r.get("cur_prc")),
+                    "volume": _abs_int(r.get("trde_qty")),
+                })
+                added_today += 1
+
+            cont_yn = resp.headers.get("cont-yn", "N")
+            next_key = resp.headers.get("next-key", "")
+            # 이번 페이지에 오늘 데이터가 없으면 어제로 넘어간 것 → 중단
+            if added_today == 0 or cont_yn != "Y" or not next_key:
+                break
+
+        candles.sort(key=lambda x: x["time"])
+        return candles
+
+    def daily_candles_paged(
+        self, ticker: str, base_dt: str | None = None, limit: int = 60
+    ) -> list[dict[str, Any]]:
+        """ka10081 주식일봉차트조회 — 연속조회로 최대 limit 영업일 반환.
+
+        Returns:
+            [{"date": "YYYYMMDD", "open": ..., "high": ..., "low": ...,
+              "close": ..., "volume": ..., "trading_value": ...}]
+            날짜 오름차순 (오래된 것 먼저).
+        """
+        from datetime import datetime as _dt
+
+        base_dt = base_dt or _dt.now().strftime("%Y%m%d")
+        result: list[dict[str, Any]] = []
+        cont_yn = "N"
+        next_key = ""
+
+        for _ in range(5):  # 페이지당 약 30일 → 5페이지면 150일 이상
+            self._guard_rate_limit("ka10081")
+            self._respect_min_interval("ka10081")
+            resp = requests.post(
+                f"{self._cfg.base_url}/api/dostk/chart",
+                headers=self._api_headers("ka10081", cont_yn=cont_yn, next_key=next_key),
+                json={"stk_cd": ticker, "base_dt": base_dt, "upd_stkpc_tp": "1"},
+                timeout=10,
+            )
+            self._mark_call("ka10081")
+            if resp.status_code == 429:
+                self._apply_rate_limit("ka10081", "http_429")
+                raise KiwoomRateLimitError(f"ka10081 rate limited (HTTP 429)")
+            resp.raise_for_status()
+            data = resp.json()
+            if self._looks_like_rate_limit(data):
+                self._apply_rate_limit("ka10081", "payload")
+                raise KiwoomRateLimitError("ka10081 rate limited")
+
+            rows = data.get("stk_dt_pole_chart_qry", [])
+            for r in rows:
+                date_str = (r.get("dt") or "").strip()
+                if not date_str:
+                    continue
+                result.append({
+                    "date": date_str,
+                    "open": _abs_float(r.get("open_pric")),
+                    "high": _abs_float(r.get("high_pric")),
+                    "low": _abs_float(r.get("low_pric")),
+                    "close": _abs_float(r.get("cur_prc")),
+                    "volume": _abs_int(r.get("trde_qty")),
+                    "trading_value": _abs_float(r.get("trde_prica")) * 1_000_000,  # 백만원→원
+                })
+
+            cont_yn = resp.headers.get("cont-yn", "N")
+            next_key = resp.headers.get("next-key", "")
+            if cont_yn != "Y" or not next_key or not rows or len(result) >= limit:
+                break
+
+        result.sort(key=lambda x: x["date"])
+        return result[-limit:]
+
+
+def _abs_float(value: Any) -> float:
+    """부호 포함 숫자 문자열 → 절댓값 float. 예: '-78800' → 78800.0"""
+    try:
+        return abs(float(str(value).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _abs_int(value: Any) -> int:
+    try:
+        return abs(int(str(value).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _expires_dt_to_epoch(value: str) -> float:

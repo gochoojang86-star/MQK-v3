@@ -91,78 +91,94 @@ def get_realtime_price(ctx: MILContext, phase: str, tickers: list[str]) -> dict:
     return ctx.cached_call("get_realtime_price", phase, {"tickers": tickers}, fetch)
 
 
-def get_intraday_candles(ctx: MILContext, phase: str, ticker: str) -> dict:
-    """주식당일분봉조회 - KIS 우선, 실패시 키움 API 폴백."""
+def _fetch_intraday_candles_raw(ctx: MILContext, ticker: str, full_day: bool = False) -> dict:
     import logging
     logger = logging.getLogger("mqk_v3")
 
-    def fetch():
-        # 1. KIS API 시도
+    # 1. 키움 API 우선 — full_day=True면 연속조회로 장 전체, 아니면 단일 호출(~30봉)
+    if ctx.kiwoom_api and ctx.kiwoom_api.available:
         try:
-            logger.debug(f"[get_intraday_candles] KIS API 호출: {ticker}")
-            raw = ctx.kis_api.raw_get(
-                "FHKST03010200",
-                "domestic-stock/v1/quotations/inquire-time-itemchartprice",
-                {
-                    "FID_ETC_CLS_CODE": "",
-                    "FID_COND_MRKT_DIV_CODE": "J",
-                    "FID_INPUT_ISCD": ticker,
-                    "FID_INPUT_HOUR_1": datetime.now().strftime("%H%M%S"),
-                    "FID_PW_DATA_INCU_YN": "N",
-                },
-            )
-            candles_data = raw.get("output2", [])
-            if candles_data:
-                logger.info(f"[get_intraday_candles] KIS API 성공: {ticker}, {len(candles_data)}개 분봉")
+            if full_day:
+                logger.debug(f"[_fetch_intraday_candles_raw] 키움 full_day: {ticker}")
+                candles = ctx.kiwoom_api.intraday_candles_full_day(ticker)
+                source = "KIWOOM_FULL"
+            else:
+                logger.debug(f"[_fetch_intraday_candles_raw] 키움 단일: {ticker}")
+                raw = ctx.kiwoom_api.intraday_candles(ticker)
+                candles_data = raw.get("stk_min_pole_chart_qry", [])
+                today_str = datetime.now().strftime("%Y%m%d")
                 candles = [
                     {
-                        "time": row.get("stck_cntg_hour"),
-                        "open": _to_float(row.get("stck_oprc")),
-                        "high": _to_float(row.get("stck_hgpr")),
-                        "low": _to_float(row.get("stck_lwpr")),
-                        "close": _to_float(row.get("stck_prpr")),
-                        "volume": _to_float(row.get("cntg_vol")),
+                        "time": (row.get("cntr_tm") or "")[8:12],
+                        "open": _to_float(row.get("open_pric")),
+                        "high": _to_float(row.get("high_pric")),
+                        "low": _to_float(row.get("low_pric")),
+                        "close": _to_float(row.get("cur_prc")),
+                        "volume": _to_float(row.get("trde_qty")),
                     }
                     for row in candles_data
+                    if (row.get("cntr_tm") or "")[:8] == today_str
                 ]
+                source = "KIWOOM"
+            if candles:
                 candles.sort(key=lambda c: c["time"] or "")
-                return {"ticker": ticker, "candles": candles, "source": "KIS"}
-            else:
-                logger.warning(f"[get_intraday_candles] KIS API 빈 응답: {ticker}")
+                logger.info(f"[_fetch_intraday_candles_raw] 키움 성공({source}): {ticker}, {len(candles)}개 분봉")
+                return {"ticker": ticker, "candles": candles, "source": source}
+            logger.warning(f"[_fetch_intraday_candles_raw] 키움 빈 응답: {ticker}")
         except Exception as e:
-            logger.warning(f"[get_intraday_candles] KIS API 실패: {ticker}, {str(e)[:100]}")
+            logger.warning(f"[_fetch_intraday_candles_raw] 키움 실패: {ticker}, {str(e)[:100]}")
 
-        # 2. 키움 API 폴백
-        if ctx.kiwoom_api and ctx.kiwoom_api.available:
-            try:
-                logger.debug(f"[get_intraday_candles] 키움 API 폴백: {ticker}")
-                raw = ctx.kiwoom_api.intraday_candles(ticker, limit=30)
-                candles_data = raw.get("stk_min_pole_chart_qry", [])
-                if candles_data:
-                    logger.info(f"[get_intraday_candles] 키움 API 성공: {ticker}, {len(candles_data)}개 분봉")
-                    candles = [
-                        {
-                            "time": row.get("cntr_tm"),
-                            "open": _to_float(row.get("open_pric")),
-                            "high": _to_float(row.get("high_pric")),
-                            "low": _to_float(row.get("low_pric")),
-                            "close": _to_float(row.get("cur_prc")),
-                            "volume": _to_float(row.get("trde_qty")),
-                        }
-                        for row in candles_data
-                    ]
-                    candles.sort(key=lambda c: c["time"] or "")
-                    return {"ticker": ticker, "candles": candles, "source": "KIWOOM"}
-                else:
-                    logger.warning(f"[get_intraday_candles] 키움 API 빈 응답: {ticker}")
-            except Exception as e:
-                logger.warning(f"[get_intraday_candles] 키움 API 폴백 실패: {ticker}, {str(e)[:100]}")
+    # 2. KIS 폴백 (최근 ~30봉)
+    try:
+        logger.debug(f"[_fetch_intraday_candles_raw] KIS 폴백: {ticker}")
+        raw = ctx.kis_api.raw_get(
+            "FHKST03010200",
+            "domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            {
+                "FID_ETC_CLS_CODE": "",
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": ticker,
+                "FID_INPUT_HOUR_1": datetime.now().strftime("%H%M%S"),
+                "FID_PW_DATA_INCU_YN": "N",
+            },
+        )
+        candles_data = raw.get("output2", [])
+        if candles_data:
+            candles = [
+                {
+                    "time": row.get("stck_cntg_hour"),
+                    "open": _to_float(row.get("stck_oprc")),
+                    "high": _to_float(row.get("stck_hgpr")),
+                    "low": _to_float(row.get("stck_lwpr")),
+                    "close": _to_float(row.get("stck_prpr")),
+                    "volume": _to_float(row.get("cntg_vol")),
+                }
+                for row in candles_data
+            ]
+            candles.sort(key=lambda c: c["time"] or "")
+            logger.info(f"[_fetch_intraday_candles_raw] KIS 폴백 성공: {ticker}, {len(candles)}개 분봉")
+            return {"ticker": ticker, "candles": candles, "source": "KIS"}
+        logger.warning(f"[_fetch_intraday_candles_raw] KIS 폴백 빈 응답: {ticker}")
+    except Exception as e:
+        logger.warning(f"[_fetch_intraday_candles_raw] KIS 폴백 실패: {ticker}, {str(e)[:100]}")
 
-        # 3. 모든 시도 실패
-        logger.error(f"[get_intraday_candles] 모든 소스 실패: {ticker}")
-        return {"ticker": ticker, "candles": [], "source": "NONE"}
+    logger.error(f"[_fetch_intraday_candles_raw] 모든 소스 실패: {ticker}")
+    return {"ticker": ticker, "candles": [], "source": "NONE"}
 
-    return ctx.cached_call("get_intraday_candles", phase, {"ticker": ticker}, fetch)
+
+def get_intraday_candles(ctx: MILContext, phase: str, ticker: str, force_refresh: bool = False) -> dict:
+    """주식당일분봉조회 — force_refresh=True 시 키움 연속조회로 장 전체 분봉 반환."""
+
+    def fetch():
+        return _fetch_intraday_candles_raw(ctx, ticker, full_day=force_refresh)
+
+    return ctx.cached_call(
+        "get_intraday_candles",
+        phase,
+        {"ticker": ticker},
+        fetch,
+        force_refresh=force_refresh,
+    )
 
 
 def get_flow(ctx: MILContext, phase: str, ticker: str) -> dict:
@@ -320,7 +336,7 @@ def search_telegram_news(ctx: MILContext, phase: str, query: str, hours: int = 7
 def get_watchlist_intraday_snapshot(ctx: MILContext, phase: str, tickers: list[str]) -> dict:
     """watchlist 장중 판단용 번들 스냅샷.
 
-    가격/등락률/거래량은 멀티시세로 배치 조회하고, 분봉/뉴스/상태는 종목별로 보강한다.
+    가격/등락률/거래량은 멀티시세로 배치 조회하고, 최신 분봉/상태만 종목별로 보강한다.
     개별 종목 실패가 전체 번들을 깨지 않도록 missing_fields에 격리한다.
     """
 
@@ -355,6 +371,16 @@ def get_watchlist_intraday_snapshot(ctx: MILContext, phase: str, tickers: list[s
                 item["name"] = snap.get("name") or ticker
                 item["trading_value"] = _to_float(snap.get("trading_value") or snap.get("acml_tr_pbmn"))
                 item["market_cap"] = _coerce_market_cap(snap)
+                # 당일 시가/고가/저가 — LIMIT_UP_PULLBACK 눌림% 계산에 사용
+                day_open = _to_float(snap.get("stck_oprc"))
+                day_high = _to_float(snap.get("stck_hgpr"))
+                day_low = _to_float(snap.get("stck_lwpr"))
+                if day_open:
+                    item["day_open"] = day_open
+                if day_high:
+                    item["day_high"] = day_high
+                if day_low:
+                    item["day_low"] = day_low
             except Exception:
                 item["name"] = ticker
                 item["trading_value"] = 0.0
@@ -362,32 +388,30 @@ def get_watchlist_intraday_snapshot(ctx: MILContext, phase: str, tickers: list[s
                 missing_fields.append("snapshot")
 
             try:
-                intraday = get_intraday_candles(ctx, phase, ticker)
-                candles = intraday.get("candles", [])
-                item["latest_candle"] = candles[-1] if candles else None
-                item["intraday_trend"] = _infer_intraday_trend(candles)
+                from broker.ohlcv_store import get_prev_day as _get_prev_day
+                today_str = datetime.now().strftime("%Y%m%d")
+                prev = _get_prev_day(ticker, today_str)
+                if prev:
+                    item["prev_close"] = prev["close"]
+                    item["prev_high"] = prev["high"]
+                    item["prev_low"] = prev["low"]
+                    item["prev_open"] = prev["open"]
             except Exception:
-                item["latest_candle"] = None
-                item["intraday_trend"] = "unknown"
-                missing_fields.append("intraday_candles")
+                pass
 
             try:
-                news = get_news_stock(ctx, phase, ticker)
-                headlines = news.get("headlines", []) or []
-                telegram = news.get("telegram_headlines", []) or []
-                naver = news.get("naver_headlines", []) or []
-                item["headline_count"] = len(headlines)
-                item["telegram_headline_count"] = len(telegram)
-                item["naver_headline_count"] = len(naver)
-                item["latest_headlines"] = [
-                    h.get("title") for h in (headlines[:1] + telegram[:1] + naver[:1]) if h.get("title")
-                ][:3]
+                intraday = _fetch_intraday_candles_raw(ctx, ticker)
+                candles = intraday.get("candles", [])
+                item["candle_count"] = len(candles)
+                item["latest_candle"] = candles[-1] if candles else None
+                item["recent_candles"] = candles[-10:] if candles else []
+                item["intraday_trend"] = _infer_intraday_trend(candles)
             except Exception:
-                item["headline_count"] = 0
-                item["telegram_headline_count"] = 0
-                item["naver_headline_count"] = 0
-                item["latest_headlines"] = []
-                missing_fields.append("news")
+                item["candle_count"] = 0
+                item["latest_candle"] = None
+                item["recent_candles"] = []
+                item["intraday_trend"] = "unknown"
+                missing_fields.append("intraday_candles")
 
             try:
                 status = get_stock_status(ctx, phase, ticker)
@@ -406,7 +430,25 @@ def get_watchlist_intraday_snapshot(ctx: MILContext, phase: str, tickers: list[s
                 item["missing_fields"] = missing_fields
             rows.append(item)
 
-        return {"tickers": rows}
+        thin_candle_tickers = [
+            r["ticker"] for r in rows if r.get("candle_count", 0) < 10
+        ]
+        guidance: dict = {}
+        if thin_candle_tickers:
+            guidance = {
+                "thin_candles": thin_candle_tickers,
+                "hint": (
+                    f"{thin_candle_tickers} 종목은 분봉이 10개 미만입니다. "
+                    "눌림/반등 패턴 확인이 필요하면 "
+                    "get_intraday_candles(ticker, force_refresh=true)를 "
+                    "추가 호출한 뒤 판단하십시오."
+                ),
+            }
+
+        result: dict = {"tickers": rows}
+        if guidance:
+            result["_guidance"] = guidance
+        return result
 
     return ctx.cached_call(
         "get_watchlist_intraday_snapshot",
