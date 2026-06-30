@@ -5,20 +5,33 @@
 오늘 진입 후보를 확정한다. 가짜 세력(개미 몰림, 뉴스성 단발)을 걸러내는 게 핵심이다.
 
 ## Inputs
+
 - `limit_up_stocks`: 전일 상한가(25%↑) 종목 리스트 (ticker, name, change_pct, trading_value_krw)
-- `premarket_movers`: 장전 예상 체결가 / 장전 거래대금
+- `premarket_movers`: 장전 **예상** 체결 순위 (KIS 동시호가 기반, 아직 실체결 아님)
+- `overtime_rank`: 장전 시간외단일가 **실체결** 순위 (키움 08:30~08:40)
+  - `kospi`: [{rank, ticker, name, price, change_pct, volume, trading_value_krw, ask_qty, bid_qty}]
+  - `kosdaq`: 위와 동일
+  - `trading_value_krw`: 원(KRW) 단위 실제 거래대금
 - `regime`: 현재 레짐 참고 지표
 - `next_day_prior`: 전일 market_close가 남긴 복기 및 관찰 우선순위 정보 (tomorrow_bias, focus_themes 등)
+
+### overtime_rank 해석 요령
+- `change_pct` 양수 = 상승, 음수 = 하락 (전일 종가 대비)
+- `bid_qty > ask_qty` = 매수 우위 (세력 의지)
+- `ask_qty > bid_qty` = 매도 우위 (세력 이탈 신호)
+- `trading_value_krw` 1억원↑ = 의미 있는 세력 참여
 
 ## 판단 흐름
 
 1. 각 상한가 종목에 대해:
    a. `get_news_stock`으로 밤새 추가 뉴스 확인 (촉매 지속성)
-   b. 장전 갭업/보합 유지 → 세력 의지 있음 → 후보 유지
-   c. 장전 갭다운 -3%↑ or 장전 거래대금 폭발적 매도 → 세력 이탈 → 제외
-2. `next_day_prior`의 관심 테마(focus_themes)나 시장 위험 포스처를 고려해 최종 진입 후보 결정에 가중치를 둔다.
-3. 레짐은 참고만 하되, 후보 제외/채택은 장전 갭·뉴스·거래대금 연속성으로 결정한다.
-4. 통과 종목에 setup=LIMIT_UP_PULLBACK, cluster=서브테마명 부여
+   b. `overtime_rank`에서 해당 종목 찾아 실체결 방향 확인 (갭업+매수 우위 = 세력 의지)
+   c. `premarket_movers`로 보완 (overtime_rank에 없는 종목 커버)
+   d. 갭다운 -3%↑ or 매도 잔량 폭발 → 세력 이탈 → 제외
+2. `overtime_rank` 상위 종목 중 `limit_up_stocks`에 없는 신규 강세 종목도 검토하라 — 어제 상한가가 아니어도 시간외에서 강한 수급이 보이면 후보가 될 수 있다.
+3. `next_day_prior`의 관심 테마(focus_themes)나 시장 위험 포스처를 고려해 최종 진입 후보 결정에 가중치를 둔다.
+4. 레짐은 참고만 하되, 후보 제외/채택은 장전 갭·뉴스·거래대금 연속성으로 결정한다.
+5. 통과 종목에 setup=LIMIT_UP_PULLBACK, cluster=서브테마명 부여
 
 ## 세력 vs 개미 판별 기준 (우선순위 순)
 1. 거래대금 연속성: 어제 하루만 터진 것인가 vs 2~3일 연속인가

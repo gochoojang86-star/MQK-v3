@@ -527,6 +527,37 @@ def get_premarket_movers(ctx: MILContext, phase: str) -> dict:
     return ctx.cached_call("get_premarket_movers", phase, {}, fetch)
 
 
+def get_overtime_rank(ctx: MILContext, phase: str) -> dict:
+    """키움 ka10098 시간외단일가 등락률 순위 — 장전(08:30~08:40) 실제 체결.
+
+    코스피 + 코스닥 각각 상승률 순으로 조회. ETF/ETN 제외.
+    거래대금(trading_value_krw)은 원(KRW) 단위.
+    """
+
+    def fetch():
+        if not (ctx.kiwoom_api and ctx.kiwoom_api.available):
+            raise ToolFailure("kiwoom_api 미설정")
+
+        result: dict[str, list] = {"kospi": [], "kosdaq": []}
+        for market_code, key in [("001", "kospi"), ("101", "kosdaq")]:
+            rows = ctx.kiwoom_api.overtime_rank(
+                market=market_code,
+                sort_base="1",        # 상승률 순
+                min_trading_value="5",  # 500만원 이상
+                stock_filter="16",    # ETF+ETN 제외
+            )
+            result[key] = rows[:30]  # 상위 30종목
+
+        total = len(result["kospi"]) + len(result["kosdaq"])
+        return {
+            "kospi": result["kospi"],
+            "kosdaq": result["kosdaq"],
+            "total": total,
+        }
+
+    return ctx.cached_call("get_overtime_rank", phase, {}, fetch)
+
+
 def get_disparity_rank(ctx: MILContext, phase: str) -> dict:
     """KIS FHPST01780000 이격도 순위.
 
@@ -760,6 +791,7 @@ def get_volume_surge(ctx: MILContext, phase: str) -> dict:
         try:
             raw = ctx.kiwoom_api.volume_surge()
             rows = raw.get("trde_qty_sdnin") or []
+            _ETF_PREFIXES = ("KODEX", "TIGER", "SOL", "RISE", "KBSTAR", "ACE", "PLUS", "KOSEF", "KoAct")
             result["stocks"] = [
                 {
                     "ticker": str(row.get("stk_cd") or "").strip(),
@@ -773,6 +805,11 @@ def get_volume_surge(ctx: MILContext, phase: str) -> dict:
                 }
                 for row in rows
                 if row.get("stk_cd")
+                and not any(row.get("stk_nm", "").startswith(p) for p in _ETF_PREFIXES)
+                and "ETN" not in row.get("stk_nm", "")
+                and "ETF" not in row.get("stk_nm", "")
+                and "레버리지" not in row.get("stk_nm", "")
+                and "인버스" not in row.get("stk_nm", "")
             ]
         except Exception as e:
             result["stocks"] = None

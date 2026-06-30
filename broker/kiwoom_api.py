@@ -596,6 +596,84 @@ class KiwoomApi:
         result.sort(key=lambda x: x["date"])
         return result[-limit:]
 
+    def overtime_rank(
+        self,
+        market: str = "000",
+        sort_base: str = "1",
+        min_trading_value: str = "0",
+        stock_filter: str = "16",
+    ) -> list[dict]:
+        """ka10098 시간외단일가 등락률 순위 — 장전(08:30~08:40) 실제 체결 데이터.
+
+        Args:
+            market: "000"=전체, "001"=코스피, "101"=코스닥
+            sort_base: "1"=상승률, "2"=상승폭, "3"=하락률, "4"=하락폭
+            min_trading_value: "0"=전체, "5"=500만원↑, "10"=1000만원↑, "100"=1억↑
+            stock_filter: "16"=ETF+ETN제외, "1"=관리종목제외, "0"=전체
+
+        Returns:
+            [{"rank", "ticker", "name", "price", "change_pct", "volume",
+              "trading_value_krw", "ask_qty", "bid_qty", "close", "close_change_pct"}]
+        """
+        rows: list[dict] = []
+        cont_yn = "N"
+        next_key = ""
+
+        while True:
+            self._guard_rate_limit("ka10098")
+            self._respect_min_interval("ka10098")
+            resp = requests.post(
+                f"{self._cfg.base_url}/api/dostk/rkinfo",
+                headers=self._api_headers("ka10098", cont_yn=cont_yn, next_key=next_key),
+                json={
+                    "mrkt_tp": market,
+                    "sort_base": sort_base,
+                    "stk_cnd": stock_filter,
+                    "trde_qty_cnd": "0",
+                    "crd_cnd": "0",
+                    "trde_prica": min_trading_value,
+                },
+                timeout=10,
+            )
+            self._mark_call("ka10098")
+            if resp.status_code == 429:
+                self._apply_rate_limit("ka10098", "http_429")
+                raise KiwoomRateLimitError("ka10098 rate limited (HTTP 429)")
+            resp.raise_for_status()
+            data = resp.json()
+            if self._looks_like_rate_limit(data):
+                self._apply_rate_limit("ka10098", "payload")
+                raise KiwoomRateLimitError("ka10098 rate limited")
+
+            for r in data.get("ovt_sigpric_flu_rt_rank", []):
+                ticker = (r.get("stk_cd") or "").strip()
+                if not ticker:
+                    continue
+                rows.append({
+                    "rank": int(r.get("rank") or 0),
+                    "ticker": ticker,
+                    "name": (r.get("stk_nm") or "").strip(),
+                    "price": _abs_float(r.get("cur_prc")),
+                    "change_pct": _abs_float(r.get("flu_rt")) * (
+                        -1 if (r.get("pred_pre_sig") or "") in ("4", "5") else 1
+                    ),
+                    "volume": _abs_int(r.get("acc_trde_qty")),
+                    "trading_value_krw": _abs_float(r.get("acc_trde_prica")) * 1_000_000,
+                    "ask_qty": _abs_int(r.get("sel_tot_req")),
+                    "bid_qty": _abs_int(r.get("buy_tot_req")),
+                    "close": _abs_float(r.get("tdy_close_pric")),
+                    "close_change_pct": _abs_float(r.get("tdy_close_pric_flu_rt")) * (
+                        -1 if (r.get("pred_pre_sig") or "") in ("4", "5") else 1
+                    ),
+                })
+
+            cont_yn = resp.headers.get("cont-yn", "N")
+            next_key = resp.headers.get("next-key", "")
+            if cont_yn != "Y" or not next_key:
+                break
+
+        return rows
+
     def fetch_universe(
         self,
         markets: list[int] | None = None,

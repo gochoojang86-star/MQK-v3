@@ -14,6 +14,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from agents.drift_detector import RegimeDriftDetector
 from agents.regime_agent import RegimeAgent
@@ -40,6 +41,7 @@ from market_intelligence import market as mil_market
 from market_intelligence import portfolio as mil_portfolio
 from market_intelligence import risk_filter as mil_risk_filter
 from market_intelligence import screening as mil_screening
+from market_intelligence import stock as mil_stock
 from market_intelligence import theme as mil_theme
 from market_intelligence.base import MILContext, ToolFailure
 from market_intelligence.cache import MILCache
@@ -79,6 +81,44 @@ def _to_float(value) -> float:
         return float(str(value).replace(",", ""))
     except (ValueError, TypeError):
         return 0.0
+
+
+def _diversify_by_theme(
+    candidates: list[dict],
+    limit: int,
+    theme_key: Callable[[dict], str],
+    cap_per_theme: int | None = None,
+) -> list[dict]:
+    """이미 점수순으로 정렬된 candidates에서 limit개를 고르되 한 테마가 결과를 독식하지 않게 한다.
+
+    여러 테마에 강한 후보가 동시에 있을 때 거래대금 1위 테마(예: 반도체)가
+    상위 점수를 휩쓸어 watchlist 전체를 잠식하는 것을 막기 위한 quota.
+    테마 태그가 없는 항목(분류 불가)은 상한 대상에서 제외한다.
+    1차로 테마당 상한 내에서 채우고, 자리가 남으면 상한을 풀고 점수순으로 마저 채운다.
+    """
+    if cap_per_theme is None:
+        cap_per_theme = max(2, -(-limit // 3))  # ceil(limit / 3), 최소 2
+
+    selected: list[dict] = []
+    theme_counts: dict[str, int] = {}
+    leftover: list[dict] = []
+
+    for item in candidates:
+        theme = theme_key(item)
+        if theme and theme_counts.get(theme, 0) >= cap_per_theme:
+            leftover.append(item)
+            continue
+        selected.append(item)
+        if theme:
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
+
+    if len(selected) > limit:
+        leftover = selected[limit:] + leftover
+        selected = selected[:limit]
+    elif len(selected) < limit:
+        selected.extend(leftover[: limit - len(selected)])
+
+    return selected
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -357,11 +397,19 @@ class MQKOrchestratorV3:
         except ToolFailure:
             premarket = {"movers": []}
 
+        try:
+            overtime = mil_screening.get_overtime_rank(
+                self._mil, TradingPhase.PREMARKET_SEJUK.value
+            )
+        except ToolFailure:
+            overtime = {"kospi": [], "kosdaq": [], "total": 0}
+
         context = self._build_context(
             TradingPhase.PREMARKET_SEJUK, regime_dict, "STABLE", watchlist=[]
         )
         context["limit_up_stocks"] = limit_up.get("stocks", [])
         context["premarket_movers"] = premarket.get("movers", [])
+        context["overtime_rank"] = overtime  # 장전 시간외단일가 실체결 순위
         context["next_day_prior"] = load_next_day_premarket_context(
             path=_NEXT_DAY_PREMARKET_CONTEXT_PATH
         )
@@ -420,22 +468,68 @@ class MQKOrchestratorV3:
         # 거래대금 폭증 종목 사전 탐지 (코드가 수집 → LLM이 검증)
         try:
             volume_surge = mil_screening.get_volume_surge(self._mil, TradingPhase.SCAN.value)
-            context["volume_surge_candidates"] = (
-                volume_surge.get("surge_top")
-                or volume_surge.get("stocks")
-                or []
-            )
+            # get_volume_surge는 "stocks" 키만 반환. "surge_top"은 존재하지 않음.
+            stocks = volume_surge.get("stocks") or []
+            context["volume_surge_candidates"] = [s for s in stocks if s.get("ticker")]
         except Exception:
             context["volume_surge_candidates"] = []
+
+        # 종목 뉴스 사전 주입 — pool 상위 8개 종목의 뉴스를 코드가 수집해 facts에 embed.
+        # LLM이 get_news_stock을 건너뛰더라도 촉매 판단 근거가 context에 이미 존재한다.
+        self._prefetch_pool_news(context["candidate_pool"])
 
         result = self._trading_agent.run(TradingPhase.SCAN, context)
         self._record_tool_request(result, TradingPhase.SCAN, regime)
         self._alert_on_tool_failures(result, TradingPhase.SCAN)
         if not result.get("watchlist"):
             result = self._backfill_scan_result(result, context)
+        else:
+            result = self._apply_scan_diversity_guard(result, context)
         save_watchlist(self._watchlist_entries_from_scan_result(result), path=_WATCHLIST_PATH)
         self._save_json("scan_v3.json", result)
         return result
+
+    def _apply_scan_diversity_guard(self, result: dict, context: dict) -> dict:
+        """LLM이 직접 채운 1차 SCAN watchlist도 단일 테마 쏠림을 막는다.
+
+        backfill/candidate_pool 단계에는 이미 _diversify_by_theme가 적용되지만,
+        LLM이 final로 낸 watchlist는 그대로 저장되어 거래대금 1위 테마가
+        결과를 독식할 수 있었다. candidate_pool에 있는 다른 테마 후보로
+        초과분을 교체해 동일한 quota를 적용한다 (watchlist 크기는 그대로 유지).
+        """
+        entries = self._watchlist_entries_from_scan_result(result)
+        if len(entries) <= 1:
+            return result
+
+        existing_tickers = {entry["ticker"] for entry in entries}
+        pool_alternatives = [
+            {
+                "ticker": item["ticker"],
+                "setup": "RELATIVE_STRENGTH",
+                "confidence": 60,
+                "reason": "orchestrator_scan_diversity_pool",
+                "theme": (item.get("facts", {}).get("theme_hints") or [None])[0],
+            }
+            for item in (context.get("candidate_pool") or [])
+            if item.get("ticker") and item["ticker"] not in existing_tickers
+        ]
+
+        diversified = _diversify_by_theme(
+            entries + pool_alternatives,
+            limit=len(entries),
+            theme_key=lambda e: str(e.get("theme") or e.get("cluster") or ""),
+        )
+
+        new_tickers = [e["ticker"] for e in diversified]
+        if new_tickers == result.get("watchlist"):
+            return result
+
+        logger.info(f"[SCAN DIVERSITY GUARD] watchlist {result.get('watchlist')} → {new_tickers}")
+        return {
+            **result,
+            "watchlist": new_tickers,
+            "candidates": diversified,
+        }
 
     # ── */5 INTRADAY (드리프트 체크 + 매수/청산 판단) ──────────────────────────
     def run_intraday_v3(self) -> dict:
@@ -905,15 +999,70 @@ class MQKOrchestratorV3:
 
         try:
             themes = mil_theme.get_theme_candidates(self._mil, phase)
-            theme_names: list[str] = []
-            for row in themes.get("candidates", [])[:8]:
-                name = str(row.get("theme_name") or row.get("group_name") or "").strip()
-                if name and name not in theme_names:
-                    theme_names.append(name)
-            brief["theme_hints"] = theme_names[:5]
+            brief["theme_hints"] = [
+                {
+                    "name": g.get("theme_name", ""),
+                    "change_pct": g.get("theme_change_pct"),
+                    "rising_count": g.get("rising_count"),
+                }
+                for g in themes.get("themes", [])[:6]
+                if g.get("theme_name")
+            ]
         except Exception as e:
             logger.warning(f"[SCAN BRIEF] theme_candidates 실패: {e}")
             missing.append("theme_candidates")
+
+        try:
+            breadth = mil_market.get_sector_breadth(self._mil, phase)
+            sectors = breadth.get("sectors", [])
+            rising = sorted(
+                [s for s in sectors if (s.get("change_pct") or 0) > 0],
+                key=lambda x: x.get("change_pct", 0),
+                reverse=True,
+            )
+            falling = sorted(
+                [s for s in sectors if (s.get("change_pct") or 0) < 0],
+                key=lambda x: x.get("change_pct", 0),
+            )
+            brief["sector_momentum"] = {
+                "rising": [
+                    {
+                        "name": s.get("sector_name"),
+                        "change_pct": s.get("change_pct"),
+                        "tv_share_pct": s.get("trading_value_share_pct"),
+                    }
+                    for s in rising[:6]
+                ],
+                "falling": [
+                    {
+                        "name": s.get("sector_name"),
+                        "change_pct": s.get("change_pct"),
+                        "tv_share_pct": s.get("trading_value_share_pct"),
+                    }
+                    for s in falling[:4]
+                ],
+            }
+        except Exception as e:
+            logger.warning(f"[SCAN BRIEF] sector_momentum 실패: {e}")
+            missing.append("sector_momentum")
+
+        # 텔레그램 무태그 속보 — 특정 종목 미매핑 뉴스를 LLM이 테마 탐색에 활용
+        try:
+            from broker.telegram_news import get_recent_news as _tg_news
+            all_tg = _tg_news(ticker="", hours=4)
+            untagged = [n for n in all_tg if not (n.get("ticker") or "").strip()]
+            brief["telegram_untagged"] = [
+                {
+                    "title": (n.get("title") or "")[:120],
+                    "source": n.get("source"),
+                    "time": (n.get("date") or "")[11:16],  # HH:MM
+                }
+                for n in untagged[:12]
+                if (n.get("title") or "").strip()
+            ]
+        except Exception as e:
+            logger.debug(f"[SCAN BRIEF] telegram_untagged 수집 실패 (스킵): {e}")
+            brief["telegram_untagged"] = []
 
         if missing:
             brief["data_quality"] = {"missing_fields": missing}
@@ -1044,7 +1193,7 @@ class MQKOrchestratorV3:
 
         try:
             themes = mil_theme.get_theme_candidates(self._mil, phase)
-            for row in (themes.get("candidates") or [])[:12]:
+            for row in (themes.get("candidates") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1059,19 +1208,68 @@ class MQKOrchestratorV3:
         candidates = list(pool.values())
         for item in candidates:
             item["why_in_pool"] = sorted(set(item["why_in_pool"]))
+        # signal_count: 복수 출처에 등장할수록 진짜 시장 주목 종목.
+        # TV rank는 대형주 편향이 강하므로 tiebreaker로만 사용.
+        for item in candidates:
+            item["_signal_count"] = len(item["why_in_pool"])
         candidates.sort(
             key=lambda item: (
+                item["_signal_count"],
                 0 if item["facts"]["trading_value_rank"] is None else 1,
                 -(item["facts"]["trading_value_rank"] or 999),
+                # attention_rank: 시장 관심도 지표 — volume_surge보다 신뢰도 높음
                 0 if item["facts"]["attention_rank"] is None else 1,
+                -(item["facts"]["attention_rank"] or 999),
+                int(item["facts"]["volume_surge"]),
                 int(bool(item["facts"]["program_netbuy_rank"])),
                 int(item["facts"]["foreign_netbuy"]),
                 int(item["facts"]["institution_netbuy"]),
-                int(item["facts"]["volume_surge"]),
             ),
             reverse=True,
         )
-        return candidates[:12]
+        diversified = _diversify_by_theme(
+            candidates,
+            limit=20,
+            theme_key=lambda item: (item["facts"]["theme_hints"] or [""])[0],
+        )
+        return diversified
+
+    def _prefetch_pool_news(self, pool: list[dict], top_n: int = 8) -> None:
+        """pool 상위 top_n 종목의 뉴스를 사전 수집해 facts["news"]에 embed한다.
+
+        LLM이 get_news_stock을 건너뛰더라도 촉매 판단 데이터가 context에 존재하도록 보장.
+        뉴스 수집 실패 시 해당 종목만 스킵 (전체 SCAN 중단 없음).
+        """
+        phase = TradingPhase.SCAN.value
+        for item in pool[:top_n]:
+            ticker = item.get("ticker", "")
+            if not ticker:
+                continue
+            try:
+                raw = mil_stock.get_news_stock(self._mil, phase, ticker)
+                # 제목만 압축해서 embed — 전문(全文) 대신 타이틀 목록
+                titles = [
+                    h.get("title", "")
+                    for h in (raw.get("headlines") or [])[:5]
+                    if h.get("title")
+                ]
+                telegram = [
+                    h.get("title", "")
+                    for h in (raw.get("telegram_headlines") or [])[:3]
+                    if h.get("title")
+                ]
+                naver = [
+                    h.get("title", "")
+                    for h in (raw.get("naver_headlines") or [])[:3]
+                    if h.get("title")
+                ]
+                item["facts"]["news"] = {
+                    "kis": titles,
+                    "telegram": telegram,
+                    "naver": naver,
+                }
+            except Exception as e:
+                logger.debug(f"[SCAN POOL NEWS] {ticker} 뉴스 수집 실패 (스킵): {e}")
 
     # ── 컨텍스트/스냅샷 빌더 ───────────────────────────────────────────────────
 
@@ -1371,7 +1569,12 @@ class MQKOrchestratorV3:
             candidates.append(row)
 
         candidates.sort(key=lambda x: (x["trading_value"], x["change_pct"]), reverse=True)
-        backfill_watchlist = [row["ticker"] for row in candidates[:limit]]
+        diversified = _diversify_by_theme(
+            candidates,
+            limit=limit,
+            theme_key=lambda row: str(row.get("theme_name") or row.get("cluster") or ""),
+        )
+        backfill_watchlist = [row["ticker"] for row in diversified]
 
         # premarket_sejuk이 저장한 LIMIT_UP_PULLBACK 후보를 backfill 앞에 붙여서 보존
         premarket_entries = [
@@ -1393,7 +1596,7 @@ class MQKOrchestratorV3:
                 "reason": f"orchestrator_scan_backfill:{row['source']}",
                 "setup": "RELATIVE_STRENGTH" if "theme" not in row["source"] else "TREND",
             }
-            for row in candidates[:limit]
+            for row in diversified
         ]
         # premarket 후보는 원본 metadata 유지
         merged_candidates = premarket_entries + [
@@ -1524,6 +1727,26 @@ class MQKOrchestratorV3:
             logger.warning(f"[V3 CASH GUARD] {ticker}: 매수가능금액 조회 실패 - {exc}")
             return None
 
+    def _theme_by_ticker_from_watchlist(self) -> dict[str, str]:
+        """watchlist.json에 SCAN이 기록한 theme/cluster를 ticker→theme 매핑으로 변환한다.
+
+        RiskOfficer의 테마 집중도 체크와 TradeProposal.theme이 실제 보유/후보 종목의
+        테마를 참조하도록 하기 위한 유일한 소스 — 코드에 하드코딩된 값은 없다.
+        """
+        mapping: dict[str, str] = {}
+        for entry in load_watchlist_entries(path=_WATCHLIST_PATH):
+            ticker = entry.get("ticker")
+            theme = entry.get("theme") or entry.get("cluster")
+            if ticker and theme:
+                mapping[str(ticker)] = str(theme)
+        return mapping
+
+    def _resolve_proposal_theme(self, proposal: dict, theme_by_ticker: dict[str, str]) -> str:
+        theme = proposal.get("theme") or proposal.get("cluster")
+        if theme:
+            return str(theme)
+        return theme_by_ticker.get(str(proposal.get("ticker") or ""), "UNKNOWN")
+
     def _process_v3_buy_proposal(self, proposal: dict) -> dict:
         ticker = str(proposal["ticker"])
         normalized_setup = _normalize_setup_name(proposal.get("setup"))
@@ -1533,7 +1756,15 @@ class MQKOrchestratorV3:
         # 텔레그램 승인/주문 로그에 종목명이 보이도록 스냅샷에서 해석 (없으면 코드로 폴백)
         stock_name = getattr(snapshot, "name", "") or ticker
         atr = self._estimate_atr(ticker)
-        portfolio_state = self.build_portfolio_state()
+        theme_by_ticker = self._theme_by_ticker_from_watchlist()
+        proposal_theme = self._resolve_proposal_theme(proposal, theme_by_ticker)
+        theme_by_ticker.setdefault(ticker, proposal_theme)
+        try:
+            portfolio_state = self.build_portfolio_state(theme_by_ticker=theme_by_ticker)
+        except TypeError:
+            # 테스트/호환성: 기존 monkeypatch가 build_portfolio_state() 시그니처를
+            # 그대로 가정하는 경우를 허용한다.
+            portfolio_state = self.build_portfolio_state()
 
         sizing = self._position_sizer.calculate_flexible_stop(
             ticker=ticker,
@@ -1557,7 +1788,7 @@ class MQKOrchestratorV3:
 
         trade_proposal = TradeProposal(
             ticker=ticker,
-            theme="V3",
+            theme=proposal_theme,
             entry_price=entry_price,
             stop_loss_price=sizing.stop_loss_price,
             quantity=sizing.quantity,
@@ -1574,6 +1805,7 @@ class MQKOrchestratorV3:
             snapshot=snapshot,
             sizing=sizing,
             portfolio_state=portfolio_state,
+            theme=proposal_theme,
         )
         if not buy_review.get("approve", True):
             logger.info(f"[V3 BUY REVIEW] {ticker}: 최종 재판단 거부 - {buy_review.get('reason', '')}")
@@ -1631,6 +1863,7 @@ class MQKOrchestratorV3:
         snapshot,
         sizing,
         portfolio_state: PortfolioState,
+        theme: str = "UNKNOWN",
     ) -> dict:
         llm = getattr(self, "_buy_review_llm", None)
         if llm is None:
@@ -1657,6 +1890,8 @@ class MQKOrchestratorV3:
             "ticker": proposal.get("ticker"),
             "name": stock_name,
             "setup": _normalize_setup_name(proposal.get("setup")),
+            "theme": theme,
+            "cluster": proposal.get("cluster") or "",
             "confidence": proposal.get("confidence", 0),
             "reason": proposal.get("reason", ""),
             "current_price": current_price,
