@@ -110,3 +110,15 @@ def test_process_telegram_actions_applies_inline_reject(tmp_path):
     assert processed == 1
     assert mgr.get_pending() == []
     assert mgr.get_approved() == []
+
+
+def test_review_comment_is_saved_for_pending_proposal(tmp_path):
+    mgr = ImprovementManager(db_path=tmp_path / "improve.db")
+    mgr.save(_proposal())
+    pid = mgr.get_pending()[0]["id"]
+
+    mgr.review(pid, "보류: 현재 patch 키 대부분이 allowlist 밖이라 즉시 적용 불가.")
+
+    reviewed = mgr.get_pending()[0]
+    assert reviewed["review_comment"].startswith("보류:")
+    assert reviewed["reviewed_at"]

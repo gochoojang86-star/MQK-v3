@@ -60,10 +60,20 @@ class RiskOfficer:
         if not self._cfg.allow_averaging_down:
             for pos in state.open_positions:
                 if pos["ticker"] == proposal.ticker:
-                    raise RiskViolation(
-                        "AVERAGING_DOWN_FORBIDDEN",
-                        f"{proposal.ticker} 이미 보유 중. 물타기 금지."
-                    )
+                    avg_price = pos.get("avg_price")
+                    # avg_price가 없으면 보수적으로 차단.
+                    # 진입가 >= 평균단가이면 스케일 인(수익 구간 추가매수) — 허용.
+                    # 진입가 < 평균단가이면 물타기 — 금지.
+                    if avg_price is None or proposal.entry_price < avg_price:
+                        label = (
+                            f"진입가 {proposal.entry_price:,.0f}원 < 평균단가 {avg_price:,.0f}원 — 물타기 금지."
+                            if avg_price is not None
+                            else "평균단가 확인 불가 — 추가 매수 금지."
+                        )
+                        raise RiskViolation(
+                            "AVERAGING_DOWN_FORBIDDEN",
+                            f"{proposal.ticker} 이미 보유 중. {label}",
+                        )
 
     def _check_daily_loss(self, state: PortfolioState) -> None:
         daily_loss_pct = (-state.daily_pnl / state.total_capital) * 100
@@ -76,11 +86,19 @@ class RiskOfficer:
 
     def _check_single_position_size(self, proposal: TradeProposal, state: PortfolioState) -> None:
         position_value = proposal.entry_price * proposal.quantity
-        position_pct = (position_value / state.total_capital) * 100
+        existing_value = 0.0
+        for pos in state.open_positions:
+            if pos.get("ticker") != proposal.ticker:
+                continue
+            qty = float(pos.get("quantity") or 0)
+            avg_price = float(pos.get("avg_price") or pos.get("entry_price") or 0)
+            existing_value += qty * avg_price
+        total_position_value = existing_value + position_value
+        position_pct = (total_position_value / state.total_capital) * 100
         if position_pct > self._cfg.max_single_position_pct:
             raise RiskViolation(
                 "MAX_SINGLE_POSITION",
-                f"{proposal.ticker} 비중 {position_pct:.1f}% > 한도 {self._cfg.max_single_position_pct}%."
+                f"{proposal.ticker} 총 비중 {position_pct:.1f}% > 한도 {self._cfg.max_single_position_pct}%."
             )
 
     def _check_theme_exposure(self, proposal: TradeProposal, state: PortfolioState) -> None:

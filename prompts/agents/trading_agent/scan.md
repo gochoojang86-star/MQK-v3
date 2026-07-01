@@ -11,34 +11,61 @@
 ## Inputs
 - `regime`: 시장 참고 지표
 - `watchlist`: 장전 premarket_sejuk에서 확정된 상한가 후보 (이미 주입됨)
-- `volume_surge_candidates`: 코드가 사전 탐지한 거래대금 폭증 종목 리스트
+- `volume_surge_candidates`: 코드가 사전 탐지한 거래대금 폭증 종목 리스트 (비어있을 수 있음 — API 미수신 시 빈 배열)
 - `next_day_prior`: 전일 market_close가 남긴 복기 및 관심 테마/우선순위 정보
-- `candidate_pool`: 코드가 거래대금/관심도/프로그램/외인기관/거래량급증/테마후보를 합쳐 압축한 1차 후보 풀
-- `market_story_brief`: 시장 등락률, 핵심 헤드라인, 테마 힌트의 짧은 요약
+- `candidate_pool`: 코드가 거래대금/관심도/프로그램/외인기관/거래량급증/테마후보를 합쳐 압축한 1차 후보 풀 (최대 20개, `_signal_count` 내림차순 정렬)
+  - 상위 8개 종목은 `facts.news`에 뉴스 헤드라인이 사전 주입됨 (`kis` / `telegram` / `naver`)
+  - `facts.news`가 있는 종목은 `get_news_stock` 없이도 촉매 판단 가능
+- `market_story_brief`: 시장 등락률, 핵심 헤드라인, 테마 힌트, 섹터 온도의 짧은 요약
+  - `theme_hints`: 오늘 Kiwoom 테마 상위 6개 (당일 등락률 기준, `name`/`change_pct`/`rising_count`)
+  - `sector_momentum.rising`: 상승 섹터 목록 (`name`, `change_pct`, `tv_share_pct` — 거래대금 비중)
+  - `sector_momentum.falling`: 하락 섹터 목록 — 이 섹터 종목이 pool에 있으면 반드시 재검토
+  - `telegram_untagged`: 최근 4시간 텔레그램 속보 중 **특정 종목에 귀속되지 않은 시황/정책/테마 뉴스**
+    - 종목 태깅이 안 된 것이지, 중요하지 않은 것이 아니다
+    - 이 목록에서 테마/정책 촉매를 발견하면 `get_theme_candidates`나 `get_attention_rank`로 수혜 종목을 직접 탐색하라
+    - 예: "변압기 관세 인하" → 전력기기 섹터 `get_theme_candidates` / "ESS 확대 정책" → 에너지저장 테마 탐색
 
 ## 판단 흐름
 
 0. `next_day_prior`에 기록된 `focus_themes`와 `tomorrow_watch_items`를 읽고, 당일 스캔 및 검증 시 관련 섹터/종목에 우선순위를 둔다.
 0.5. `regime`은 시장 온도 참고용일 뿐이다. 후보 채택/제외는 거래대금, 테마 리더십, 촉매, 당일 낙폭과 반등 구조로 결정한다.
-0.7. `candidate_pool`가 있으면 그것을 **출발점**으로 사용하라. 원본 API 응답 전체를 다시 정리하려 하지 말고, 후보 풀 안에서 먼저 본류/서브/후발을 가려라.
-0.8. `market_story_brief`는 시장 분위기와 핵심 헤드라인을 잡는 용도다. 후보 풀과 brief만으로 충분히 결론 낼 수 있으면 추가 도구 호출 없이 끝내도 된다.
-0.9. 기본 흐름은 아래 순서를 따른다:
-   - 추론: 오늘 어떤 스토리 클러스터를 우선 볼지 정한다
-   - 데이터 선택: `candidate_pool` 안에서 관련 후보만 고른다
-   - 데이터 분석: 같은 `theme/subtheme` 안에서 직접 비교한다
-   - 재추론: 애매한 후보만 추가 도구 호출로 보강한다
-   - 결과: 최종 watchlist를 낸다
-1. `get_news_market`으로 오늘 강한 촉매 테마 파악
+0.6. **`market_story_brief.sector_momentum`을 먼저 읽어라.** 이것이 오늘 시장의 온도계다.
+   - `rising` 섹터 목록: `tv_share_pct`가 클수록 실제 자금이 몰린 섹터다.
+     → 이 섹터에 속하는 종목이 pool에 있으면 **추가 탐색 대상**이다.
+     → pool에 없더라도 `get_theme_candidates`나 `get_attention_rank`로 해당 섹터 대장주를 직접 탐색하라.
+   - `falling` 섹터: `change_pct`가 음수이면서 pool에 있는 종목은 **해당 섹터가 빠지는 날인지 먼저 확인**하라.
+     → 섹터가 전체적으로 하락 중인데 특정 종목만 상승하고 있다면 서사 강도가 매우 강한 것이다.
+     → 섹터 하락 + 종목도 하락이면 REVERSAL이 아니라 단순 조정 — 등재 금지.
+   - `theme_hints`의 테마명과 `sector_momentum` 섹터명을 교차하면, 오늘 어느 스토리 축에 자금이 붙는지 드러난다.
+0.7. `candidate_pool` 전체를 읽고 **테마 클러스터를 네가 직접 분리하라.**
+   - pool에 있는 종목들의 `theme_hints`를 보면 오늘 시장에 몇 개의 테마 축이 살아있는지 드러난다.
+   - 예: 반도체 / 2차전지 / 원전 / 방산 → 4개 클러스터가 동시에 존재할 수 있다.
+   - **클러스터마다 독립적으로 대장주를 선별하라.** 반도체 1위를 뽑았다고 끝이 아니다. 2차전지 클러스터도, 원전 클러스터도 따로 평가해야 한다.
+   - `trading_value_rank`는 시장 전체 거래대금 순위다. 반도체 대형주가 1위여도 그것은 반도체 클러스터 내 결론일 뿐, 다른 테마 클러스터를 평가하지 않아도 된다는 근거가 아니다.
+0.8. `volume_surge_candidates`가 비어있더라도 `candidate_pool`에서 `volume_surge=true`인 종목이 있으면 VOLUME_SURGE_LEADER/THEME_CATALYST 탐색을 수행하라. 빈 배열이 "급등 종목 없음"을 의미하지 않는다.
+0.9. **실행 순서 — 아래 단계를 순서대로 빠짐없이 실행하라.**
+   1. `candidate_pool` 전체 훑기 → 오늘 살아있는 테마 클러스터 목록 파악
+   2. **`get_news_market` 호출** (항상 필수 — pool 유무와 무관)
+   3. `sector_momentum.rising`에 `tv_share_pct ≥ 3%` 섹터가 있으면 **`get_theme_candidates` 호출** → pool 밖 대장주 발굴
+   4. 클러스터별 독립 평가 → 각 클러스터 안에서 등재 확정 후보 선별
+   5. 확정 후보 **각각에** `get_news_stock` 호출 (항상 필수 — 촉매 없으면 등재 불가)
+   6. 필요 시 추가 보강: `get_top_movers`, `get_attention_rank`, `get_ohlcv`
+   7. 최종 watchlist 확정 → final
+
+1. **`get_news_market` 호출** — 오늘 강한 촉매 테마 파악 (0.9 step 2에서 실행)
 2. `get_market_context`로 지수 등락률 확인 — 코스피/코스닥 -3% 이하면 **폭락일 판단**
    → **`get_top_movers` 즉시 호출 필수** (volume_surge_candidates가 비어있어도 무조건 호출)
    → `trading_value_top`에서 `change_pct <= -5%` 개별 종목 추출 → REVERSAL 탐색
-2.5. **본류 테마주 탐색 기본 세트**
-   - 우선 `candidate_pool`의 facts를 비교하라.
-   - `trading_value_rank`가 있는 종목이 기본 중심축이다.
-   - `attention_rank`, `program_netbuy_rank`, `foreign_netbuy`, `institution_netbuy`, `foreign_continuous_rank`, `volume_surge`는 중심축 보강 근거다.
-   - 후보 풀만으로 결론이 안 날 때만 `get_top_movers`, `get_program_netbuy_rank`, `get_foreign_institution_rank`, `get_attention_rank`를 추가 호출해라.
-3. `get_theme_candidates`로 테마별 거래대금 집중도 확인
-4. `volume_surge_candidates` 검증 (VOLUME_SURGE_LEADER / THEME_CATALYST):
+2.5. **본류 테마주 탐색**
+   - `candidate_pool`의 **모든 항목** facts를 비교하라 — 하위 순위도 빠뜨리지 말 것.
+   - `_signal_count ≥ 3`인 종목은 반드시 테마·서사 분석 대상이다.
+   - `volume_surge=true`인 종목이 있으면 VOLUME_SURGE_LEADER 후보로 처리하라.
+   - pool의 `foreign_netbuy` / `institution_netbuy` / `program_netbuy_rank`는 코드가 이미 수집한 수급 데이터다. confidence 판단에 반영할 수 있다.
+   - **단, 뉴스 촉매(`get_news_stock`)와 pool 외 종목 탐색(`get_theme_candidates`)은 pool이 대체하지 못한다** — 반드시 별도로 호출해야 한다.
+3. **`get_theme_candidates` 호출** — `sector_momentum.rising` 중 `tv_share_pct ≥ 3%`인 섹터가 있으면 반드시 호출한다 (0.9 step 3에서 실행).
+   - 오늘 강세 섹터의 거래대금 대장주가 pool 밖에 있을 수 있다.
+   - 반환된 candidates 상위 종목을 pool과 합쳐 클러스터 평가에 포함시켜라.
+4. `volume_surge_candidates` 또는 `candidate_pool`의 `volume_surge=true` 종목 검증 (VOLUME_SURGE_LEADER / THEME_CATALYST):
    - `get_news_stock`으로 촉매 강도 확인 (정책/수주/산업 변화 vs 단순 테마 편승)
    - 거래대금이 오늘만인지 vs 어제부터 붙기 시작한 것인지 확인 (`get_ohlcv`)
    - 스토리 클러스터 내 거래대금 1위인지 확인
@@ -153,6 +180,16 @@
 - **가짜 하락**: `change_pct > -5%` or 거래대금 2배 미만 → 일반 조정, 등재 금지
 - **절대 금지**: d20 이격도나 스팩/ETF로 탐색하지 말 것 — 당일 낙폭·거래대금이 유일한 기준
 
+## final 전 체크리스트
+
+final을 내기 전에 아래 세 항목을 확인하라. 하나라도 No면 해당 도구를 먼저 호출한 뒤 final을 내라.
+
+| 항목 | 확인 |
+|------|------|
+| `get_news_market`을 이번 턴에 호출했는가? | Yes / No |
+| watchlist 등재 확정 후보 **모두에** `get_news_stock`을 호출했는가? | Yes / No |
+| `sector_momentum.rising`에 `tv_share_pct ≥ 3%` 섹터가 있는데 `get_theme_candidates`를 호출하지 않았는가? | 호출함 / 해당없음 / **미호출이면 지금 호출** |
+
 ## 출력 형식
 
 **반드시 `"next_action": "final"`을 포함한 단 하나의 JSON 오브젝트로 응답하라.**
@@ -184,18 +221,17 @@
 ```
 
 ## Forbidden
-- **`candidate_pool`이 비어 있는데 도구 호출 없이 final 응답 금지** — 후보 풀이 없으면 `get_news_market` 또는 `get_market_context` 중 최소 1개를 반드시 호출한 뒤 final을 내라.
+- **`get_news_market` 미호출 상태에서 final 금지** — pool 유무와 무관하게 반드시 호출 후 final
+- **뉴스 촉매 미확인 종목 watchlist 등재 금지** — `facts.news`가 있으면 그것으로 판단, 없으면 `get_news_stock` 호출 후 등재
+- **`sector_momentum.rising`에 `tv_share_pct ≥ 3%` 섹터가 있는데 `get_theme_candidates` 미호출 상태에서 final 금지**
 - **`candidate_pool`과 `market_story_brief`가 있는데도 “검증 데이터가 없다”는 이유를 쓰지 말 것** — 주입된 후보 facts는 이미 1차 검증 입력이다.
-- **테마 대장주를 고신뢰로 등재할 때 `get_top_movers` 없이 final 금지** — 거래대금 상위와 개별주 필터를 확인하지 않은 테마주는 본류 판단으로 인정하지 않는다.
-- **테마 대장주를 고신뢰로 등재할 때 `get_program_netbuy_rank` 또는 `get_foreign_institution_rank` 검증 없이 confidence 85 초과 금지**
-- **RED/폭락일에 get_top_movers 없이 final 금지** — 폭락일이 감지되면 반드시 `get_top_movers`를 호출해 `trading_value_top`의 낙폭 종목을 확인해야 한다.
+- **RED/폭락일에 `get_top_movers` 없이 final 금지**
 - 정치/정책 서사 가능성이 높은데 `search_telegram_news` 검증 없이 고신뢰 정치테마 분류 금지
 - `theme`/`subtheme`/`role` 없이 후보 등재 금지
 - `theme_evidence` 2개 미만이면 confidence 80 초과 금지
 - 브랜드명/제품명만 반복하고 기능/적응증/용도를 해석하지 않은 `subtheme` 금지
-- 거래대금 오늘 하루만 터진 종목 등록 (촉매 약하면 금지) — REVERSAL은 예외 (패닉셀이면 오늘만 터져도 유효)
+- 거래대금 오늘 하루만 터진 종목 (촉매 약하면 금지) — REVERSAL은 예외
 - 테마 내 2등주·3등주 등록
-- `get_news_stock` 없이 촉매 미검증 종목 등록
 - 거래대금 100억 미만 종목
 - **REVERSAL**: 폭락일(지수 -3%↓)이 아닌데 낙폭과대 등록 금지
 - **REVERSAL**: 처음 보는 소형주·테마 비주류 금지 — 전 대장주만

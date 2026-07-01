@@ -374,16 +374,16 @@ class MQKOrchestratorV3:
         self._trading_agent = TradingAgent(mil=self._mil)
         self._last_portfolio_snapshot: tuple[dict, dict] | None = None
 
-    # ── 08:45 PREMARKET_SEJUK (장전 상한가 세력 검증) ───────────────────────
+    # ── 08:45 PREMARKET_SEJUK (장전 급등주 세력 검증) ───────────────────────
     def run_premarket_early_v3(self) -> dict:
-        """08:45 장전 루틴 (v4 전략). 전날 상한가 종목 + 장전거래를 교차 분석해
+        """08:45 장전 루틴 (v4 전략). 전날 20% 이상 상승 종목 + 장전거래를 교차 분석해
         오늘 진입 후보를 watchlist에 선주입한다. 세력 이탈 종목은 제거.
         레짐 판단은 09:03 run_premarket_v3()가 담당.
         """
         regime = load_last_regime(path=_LAST_REGIME_PATH) or {}
         regime_dict = _regime_to_dict(regime) if hasattr(regime, 'status') else regime
 
-        # 코드가 결정론적으로 수집: 상한가 종목 + 장전 체결 데이터
+        # 코드가 결정론적으로 수집: 전일 급등 강세주 + 장전 체결 데이터
         try:
             limit_up = mil_screening.get_limit_up_stocks(
                 self._mil, TradingPhase.PREMARKET_SEJUK.value
@@ -419,7 +419,7 @@ class MQKOrchestratorV3:
         self._alert_on_tool_failures(result, TradingPhase.PREMARKET_SEJUK)
         self._save_json("premarket_early_review.json", result)
 
-        # LLM이 선별한 후보를 watchlist에 선주입 (run_scan_v3에서 최종 확정)
+        # LLM이 선별한 장전 강세 후보를 watchlist에 선주입 (run_scan_v3에서 최종 확정)
         candidates = result.get("candidates", [])
         if candidates:
             save_watchlist(candidates, path=_WATCHLIST_PATH)
@@ -501,6 +501,13 @@ class MQKOrchestratorV3:
             result = self._backfill_scan_result(result, context)
         else:
             result = self._apply_scan_diversity_guard(result, context)
+        # 신규 편입 종목 계산 (scan 직후 intraday 즉시 트리거용)
+        existing_tickers = {e["ticker"] for e in existing_watchlist if isinstance(e, dict)}
+        new_wl = result.get("watchlist") or []
+        result["new_watchlist_additions"] = [
+            _watchlist_ticker(e) for e in new_wl
+            if _watchlist_ticker(e) and _watchlist_ticker(e) not in existing_tickers
+        ]
         save_watchlist(self._watchlist_entries_from_scan_result(result), path=_WATCHLIST_PATH)
         # 디버깅용 저장 — candidate_pool 핵심 facts + market_story_brief
         result["_debug_candidate_pool"] = [

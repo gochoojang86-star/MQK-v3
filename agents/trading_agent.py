@@ -169,7 +169,7 @@ _ALLOWED_TOOL_ARGS: dict[str, set[str]] = {
     "get_ohlcv": {"ticker", "period"},
     "get_realtime_price": {"tickers"},
     "get_watchlist_intraday_snapshot": {"tickers"},
-    "get_intraday_candles": {"ticker"},
+    "get_intraday_candles": {"ticker", "force_refresh"},
     "get_flow": {"ticker"},
     "get_news_stock": {"ticker"},
     "search_telegram_news": {"query", "hours", "limit"},
@@ -257,8 +257,14 @@ class TradingAgent:
                 # 죽지 않도록 1회 재시도 후 NO_TRADE로 강등한다.
                 llm_failures += 1
                 if llm_failures >= 2:
-                    return {"next_action": "final", "action": "NO_TRADE",
-                            "reason": f"llm_invalid_json: {e}"}
+                    return self._attach_tool_history(
+                        {
+                            "next_action": "final",
+                            "action": "NO_TRADE",
+                            "reason": f"llm_invalid_json: {e}",
+                        },
+                        tool_history,
+                    )
                 transcript.append(json.dumps(
                     {"error": "invalid_json_response",
                      "instruction": "직전 응답이 유효한 단일 JSON 오브젝트가 아니었다. 반드시 JSON 오브젝트 하나만 반환하라."},
@@ -301,7 +307,7 @@ class TradingAgent:
                         }, ensure_ascii=False))
                         continue
                     response = self._maybe_backfill_scan_result(context, tool_history, response)
-                    return response
+                    return self._attach_tool_history(response, tool_history)
 
                 # INTRADAY: 도구 호출 없이 바로 HOLD/NO_TRADE를 냈으면 강제 재시도.
                 # LLM이 실시간 데이터 없이 판단하면 세력 이탈 신호를 놓친다.
@@ -321,10 +327,13 @@ class TradingAgent:
                         }, ensure_ascii=False))
                         continue  # 루프 재실행 — 이번엔 도구를 호출해야 함
 
-                return response
+                return self._attach_tool_history(response, tool_history)
 
             if next_action == "tool_request":
-                return self._finalize_tool_request(phase, context, response)
+                return self._attach_tool_history(
+                    self._finalize_tool_request(phase, context, response),
+                    tool_history,
+                )
 
             if next_action == "call_tool":
                 tool_name = response.get("tool", "")
@@ -355,29 +364,56 @@ class TradingAgent:
                         "message": tool_result.get("message"),
                     })
                     if len(tool_failures) >= 3:
-                        return {
-                            "next_action": "final",
-                            "action": "NO_TRADE",
-                            "reason": "tool_failures_exceeded",
-                            "tool_failures": tool_failures,
-                        }
+                        return self._attach_tool_history(
+                            {
+                                "next_action": "final",
+                                "action": "NO_TRADE",
+                                "reason": "tool_failures_exceeded",
+                                "tool_failures": tool_failures,
+                            },
+                            tool_history,
+                        )
                 transcript.append(json.dumps(
                     {"tool_call": {"tool": tool_name, "args": tool_args}, "tool_result": tool_result},
                     ensure_ascii=False,
                 ))
                 continue
 
-            return {"next_action": "final", "action": "NO_TRADE",
-                    "reason": f"unknown_next_action:{next_action}"}
+            return self._attach_tool_history(
+                {
+                    "next_action": "final",
+                    "action": "NO_TRADE",
+                    "reason": f"unknown_next_action:{next_action}",
+                },
+                tool_history,
+            )
 
         if phase == TradingPhase.SCAN:
-            return self._fallback_scan_result(context, tool_history, reason="max_steps_exceeded")
-        return {"next_action": "final", "action": "NO_TRADE", "reason": "max_steps_exceeded"}
+            return self._attach_tool_history(
+                self._fallback_scan_result(context, tool_history, reason="max_steps_exceeded"),
+                tool_history,
+            )
+        return self._attach_tool_history(
+            {"next_action": "final", "action": "NO_TRADE", "reason": "max_steps_exceeded"},
+            tool_history,
+        )
+
+    def _attach_tool_history(self, result: dict, tool_history: list[dict[str, Any]]) -> dict:
+        if not tool_history:
+            return result
+        enriched = dict(result)
+        enriched["tool_history"] = list(tool_history)
+        return enriched
 
     def _tier_for_phase(self, phase) -> ModelTier:
         if self._tier_map_override and phase in self._tier_map_override:
             return self._tier_map_override[phase]
-        if phase in {TradingPhase.SCAN, TradingPhase.PREMARKET_SEJUK}:
+        # SCAN은 스토리 클러스터 분리·본류/후발 비교처럼 다단계 해석이 필요하고
+        # 하루 4회만 호출되므로(09:17/11:17/13:17/15:00) REASONING 티어 비용이 작다.
+        # INTRADAY/LATE_INTRADAY는 5분 간격 등 호출 빈도가 높아 STANDARD를 유지한다.
+        if phase == TradingPhase.SCAN:
+            return ModelTier.REASONING
+        if phase == TradingPhase.PREMARKET_SEJUK:
             return ModelTier.STANDARD
         if phase in {TradingPhase.PREMARKET, TradingPhase.CLOSE, TradingPhase.MARKET_CLOSE}:
             return ModelTier.FAST

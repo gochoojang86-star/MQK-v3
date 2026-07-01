@@ -36,11 +36,50 @@ def test_clean_trade_passes():
 
 def test_averaging_down_blocked():
     officer = RiskOfficer()
+    # 진입가(70,000) < 평균단가(80,000) → 물타기 → 차단
+    proposal = make_proposal(ticker="005930", entry_price=70_000)
+    state = make_state(open_positions=[{"ticker": "005930", "quantity": 5, "avg_price": 80_000}])
+    with pytest.raises(RiskViolation) as exc_info:
+        officer.check(proposal, state)
+    assert exc_info.value.rule == "AVERAGING_DOWN_FORBIDDEN"
+
+
+def test_averaging_down_blocked_when_avg_price_missing():
+    officer = RiskOfficer()
+    # avg_price 없으면 보수적으로 차단
     proposal = make_proposal(ticker="005930")
     state = make_state(open_positions=[{"ticker": "005930", "quantity": 5}])
     with pytest.raises(RiskViolation) as exc_info:
         officer.check(proposal, state)
     assert exc_info.value.rule == "AVERAGING_DOWN_FORBIDDEN"
+
+
+def test_scale_in_allowed_when_entry_above_avg():
+    officer = RiskOfficer()
+    # 진입가(90,000) >= 평균단가(70,000) → 스케일 인 → 허용
+    proposal = make_proposal(ticker="005930", entry_price=90_000, stop_loss_price=85_000)
+    state = make_state(open_positions=[{"ticker": "005930", "quantity": 5, "avg_price": 70_000}])
+    officer.check(proposal, state)  # 예외 없어야 함
+
+
+def test_scale_in_allowed_at_same_price():
+    officer = RiskOfficer()
+    # 진입가 == 평균단가 → 허용 (손절 조정 재진입 등)
+    proposal = make_proposal(ticker="005930", entry_price=70_000, stop_loss_price=67_000)
+    state = make_state(open_positions=[{"ticker": "005930", "quantity": 5, "avg_price": 70_000}])
+    officer.check(proposal, state)  # 예외 없어야 함
+
+
+def test_scale_in_blocked_when_total_position_exceeds_cap():
+    officer = RiskOfficer()
+    proposal = make_proposal(ticker="005930", entry_price=90_000, stop_loss_price=85_000, quantity=10)
+    state = make_state(
+        total_capital=10_000_000,
+        open_positions=[{"ticker": "005930", "quantity": 20, "avg_price": 70_000}],
+    )
+    with pytest.raises(RiskViolation) as exc_info:
+        officer.check(proposal, state)
+    assert exc_info.value.rule == "MAX_SINGLE_POSITION"
 
 
 def test_daily_loss_limit():
@@ -108,7 +147,7 @@ def test_regime_safety_bounds_defaults():
     assert bounds.max_risk_per_trade_pct == 0.50
     assert bounds.min_positions == 1
     assert bounds.max_positions == 5
-    assert bounds.min_trading_value_krw == 5_000_000_000
+    assert bounds.min_trading_value_krw == 10_000_000_000
 
 
 def test_clamp_risk_guidance_within_bounds_unchanged():
@@ -138,7 +177,7 @@ def test_clamp_risk_guidance_clamps_extreme_llm_values():
     assert clamped["buy_confidence_threshold"] == 65.0
     assert clamped["risk_per_trade_pct"] == 0.50
     assert clamped["max_positions"] == 5
-    assert clamped["min_trading_value_krw"] == 5_000_000_000
+    assert clamped["min_trading_value_krw"] == 10_000_000_000
 
 
 def test_clamp_risk_guidance_fills_missing_keys_with_defaults():
@@ -146,4 +185,4 @@ def test_clamp_risk_guidance_fills_missing_keys_with_defaults():
     assert clamped["buy_confidence_threshold"] == 65.0
     assert clamped["risk_per_trade_pct"] == 0.10
     assert clamped["max_positions"] == 1
-    assert clamped["min_trading_value_krw"] == 5_000_000_000
+    assert clamped["min_trading_value_krw"] == 10_000_000_000

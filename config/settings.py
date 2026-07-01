@@ -13,9 +13,9 @@ BASE_DIR = Path(__file__).parent.parent
 
 
 class ModelTier(str, Enum):
-    REASONING = "reasoning"  # o4-mini        — 핵심 판단, 추론 필요
-    STANDARD  = "standard"   # gpt-4o         — 복합 해석, 중간 복잡도
-    FAST      = "fast"       # gpt-4o-mini    — 단순 분류, 반복 패턴
+    REASONING = "reasoning"  # gpt-5.4       — 핵심 판단, 추론 필요 (저빈도 호출)
+    STANDARD  = "standard"   # gpt-5.4-mini  — 복합 해석, 고빈도 호출 (비용 통제)
+    FAST      = "fast"       # gpt-5.4-mini  — 단순 분류, 반복 패턴
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ class RegimeSafetyBounds:
     max_risk_per_trade_pct: float = 0.50   # RiskConfig.risk_per_trade_pct(0.5)가 천장
     min_positions: int = 1
     max_positions: int = 5                  # RiskConfig.max_positions(5)가 천장
-    min_trading_value_krw: int = 5_000_000_000
+    min_trading_value_krw: int = 10_000_000_000  # 최소 거래대금 100억 (scan.md Forbidden 기준과 일치)
     min_cooldown_minutes: int = 15
     max_cooldown_minutes: int = 240
     default_cooldown_minutes: int = 60
@@ -60,7 +60,7 @@ class ScannerConfig:
     universe_size: int = 5000             # 전체 종목수
     candidate_count: int = 30            # Scanner 통과 종목수
     final_candidates: int = 5            # LLM 평가 최종 종목수
-    min_trading_value_krw: int = 5_000_000_000  # 최소 거래대금 50억
+    min_trading_value_krw: int = 10_000_000_000  # 최소 거래대금 100억
 
 
 @dataclass(frozen=True)
@@ -81,9 +81,9 @@ class LLMConfig:
     provider: str = os.environ.get("LLM_PROVIDER", "openai").strip().lower() or "openai"
 
     # ── OpenAI 모델 배치 (Hermes/Codex OAuth 인증) ───────────────────────────
-    # REASONING: 핵심 투자 판단 (PortfolioManager, SelfImprovement)
+    # REASONING: 저빈도 핵심 판단 (TradingAgent SCAN, 최종 매수 리뷰어)
     model_reasoning: str = "gpt-5.4"
-    # STANDARD: 반복 호출되는 주력 운영 경로 (TradingAgent SCAN/INTRADAY)
+    # STANDARD: 고빈도 운영 경로 — 비용 통제 위해 mini 유지 (TradingAgent INTRADAY 등)
     model_standard: str = "gpt-5.4-mini"
     # FAST: 단순 분류/복기/보조 분석
     model_fast: str = "gpt-5.4-mini"

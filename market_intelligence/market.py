@@ -35,6 +35,8 @@ def get_market_context(ctx: MILContext, phase: str) -> dict:
             "kospi_change_pct": _to_float(index_status.get("kospi_change_pct")),
             "kosdaq": _to_float(index_status.get("kosdaq")),
             "kosdaq_change_pct": _to_float(index_status.get("kosdaq_change_pct")),
+            "kospi_trading_value": _to_float(index_status.get("kospi_trading_value")),
+            "kosdaq_trading_value": _to_float(index_status.get("kosdaq_trading_value")),
             "kospi_advancers": _to_int(index_status.get("kospi_advancers")),
             "kospi_decliners": _to_int(index_status.get("kospi_decliners")),
             "foreign_net_buy_krw": foreign_net,

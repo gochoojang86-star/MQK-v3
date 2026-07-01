@@ -54,6 +54,26 @@ def test_judge_uses_opening_weighting_by_default():
     assert "전일 확정 데이터를 주요 근거로" in llm.last_user
 
 
+def test_judge_includes_premarket_flow_payload_in_user_message():
+    raw = {"status": "GREEN", "regime": "UPTREND", "confidence": 70, "reason": "강세"}
+    llm = FakeLLMClient(raw)
+    agent = RegimeAgent(llm=llm)
+
+    agent.judge({
+        "premarket_flow": {
+            "sector_investor_flow_top": [{"sector_name": "반도체", "institution_net": 1200, "foreign_net": 800}],
+            "program_netbuy_top": [{"ticker": "000660", "name": "SK하이닉스", "program_netbuy_amount_mnkrw": 50000}],
+            "foreign_netbuy_top": [{"ticker": "005930", "name": "삼성전자", "netbuy_amount": 32000}],
+            "institution_netbuy_top": [{"ticker": "000660", "name": "SK하이닉스", "netbuy_amount": 28000}],
+            "missing_fields": [],
+        }
+    })
+
+    assert "장전 수급 데이터" in llm.last_user
+    assert "반도체" in llm.last_user
+    assert "SK하이닉스" in llm.last_user
+
+
 def test_judge_uses_intraday_weighting_for_midday():
     raw = {"status": "GREEN", "regime": "UPTREND", "confidence": 70, "reason": "강세"}
     llm = FakeLLMClient(raw)
@@ -75,7 +95,7 @@ def test_judge_clamps_extreme_risk_guidance_via_safety_bounds():
             "buy_confidence_threshold": 30,   # 너무 낮음 → 65로 클램프
             "risk_per_trade_pct": 5.0,        # 너무 큼 → 0.50로 클램프
             "max_positions": 99,              # 너무 큼 → 5로 클램프
-            "min_trading_value_krw": 1,       # 너무 작음 → 50억으로 클램프
+            "min_trading_value_krw": 1,       # 너무 작음 → 100억으로 클램프
         },
         "drift_triggers": [],
     }
@@ -85,7 +105,7 @@ def test_judge_clamps_extreme_risk_guidance_via_safety_bounds():
     assert judgment.risk_guidance["buy_confidence_threshold"] == 65.0
     assert judgment.risk_guidance["risk_per_trade_pct"] == 0.50
     assert judgment.risk_guidance["max_positions"] == 5
-    assert judgment.risk_guidance["min_trading_value_krw"] == 5_000_000_000
+    assert judgment.risk_guidance["min_trading_value_krw"] == 10_000_000_000
 
 
 def test_judge_defaults_when_v3_fields_missing():

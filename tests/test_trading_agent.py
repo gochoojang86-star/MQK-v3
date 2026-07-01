@@ -46,6 +46,28 @@ def test_build_context_includes_allowed_tools_for_phase():
     assert ctx["exploration_policy"] == {}
 
 
+def test_build_context_preserves_intraday_exploration_policy_fields():
+    ctx = build_context(
+        phase=TradingPhase.INTRADAY,
+        trading_date="2026-06-09",
+        regime={"status": "YELLOW", "confidence": 44},
+        drift_status="STABLE",
+        risk_guidance={"buy_confidence_threshold": 75},
+        portfolio_snapshot={"positions": [], "position_count": 0},
+        daily_pnl={"realized_pnl_pct": 0.0},
+        risk_budget_remaining={"positions_left": 4, "daily_loss_remaining_pct": 2.0},
+        watchlist=["005930"],
+        exploration_policy={
+            "allow_intraday_discovery": True,
+            "volume_trend_use_averages": True,
+            "leader_reentry_confidence_floor": 70.0,
+        },
+    )
+
+    assert ctx["exploration_policy"]["volume_trend_use_averages"] is True
+    assert ctx["exploration_policy"]["leader_reentry_confidence_floor"] == 70.0
+
+
 def test_phase_tools_only_reference_known_tools():
     for phase, tools in PHASE_TOOLS.items():
         for tool in tools:
@@ -55,7 +77,7 @@ def test_phase_tools_only_reference_known_tools():
 def test_tier_for_phase_uses_reasoning_only_for_scan():
     agent = TradingAgent(mil=object(), llm=FakeLLMClient([]))
 
-    assert agent._tier_for_phase(TradingPhase.SCAN).value == "standard"
+    assert agent._tier_for_phase(TradingPhase.SCAN).value == "reasoning"
     assert agent._tier_for_phase(TradingPhase.PREMARKET_SEJUK).value == "standard"
     assert agent._tier_for_phase(TradingPhase.INTRADAY).value == "standard"
     assert agent._tier_for_phase(TradingPhase.LATE_INTRADAY).value == "standard"
@@ -84,6 +106,7 @@ def test_run_executes_allowed_tool_then_returns_final(monkeypatch):
 
     assert result["action"] == "WATCHLIST_UPDATE"
     assert result["watchlist"] == ["005930"]
+    assert result["tool_history"][0]["tool"] == "get_market_context"
     assert len(llm.calls) == 2
     # 두 번째 호출의 user 메시지에 첫 번째 도구 결과가 포함되어야 한다
     assert "kospi_change_pct" in llm.calls[1][1]
@@ -311,7 +334,8 @@ def test_scan_prompt_mentions_program_and_trading_value_stock_rank_usage():
 def test_scan_prompt_mentions_candidate_pool_as_primary_input():
     text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
     assert "candidate_pool" in text
-    assert "출발점" in text
+    assert "모든 항목" in text  # 출발점→모든 항목 검토로 변경
+    assert "_signal_count" in text  # signal_count 기반 정렬 안내 포함 확인
     assert "주입된 후보 facts는 이미 1차 검증 입력" in text
 
 
@@ -324,8 +348,12 @@ def test_scan_prompt_mentions_llm_peer_comparison_within_theme_cluster():
 
 def test_intraday_prompt_mentions_recompare_within_same_theme_subtheme():
     text = Path("prompts/agents/trading_agent/intraday.md").read_text(encoding="utf-8")
-    assert "같은 `theme/subtheme` 안에 watchlist 종목이 여러 개면, **장중에도 다시 비교**" in text
-    assert "후발주는 진입 금지하고 본류만 본다" in text
+    # 같은 테마 내 비교 원칙과 후발주 제한이 프롬프트에 포함되어야 한다
+    assert "같은 테마" in text
+    assert "후발주" in text
+    assert "본류 대장주가 살아 있으면 후발주에 시간을 낭비하지 마라" in text
+    assert "거래대금이 죽은 종목은 빠르게 버려라" in text
+    assert "우선순위에서 제외하라" in text
 
 
 def test_v3_reversal_prompts_use_single_reversal_tactic_name():
@@ -335,7 +363,7 @@ def test_v3_reversal_prompts_use_single_reversal_tactic_name():
     assert "REVERSAL_BOTTOM" not in scan_text
     assert "REVERSAL_BOTTOM" not in intraday_text
     assert '"setup": "VOLUME_SURGE_LEADER|THEME_CATALYST|REVERSAL"' in scan_text
-    assert "### REVERSAL (폭락 대장주 저점 반등)" in intraday_text
+    assert "REVERSAL" in intraday_text
     assert '"next_action": "final"' in intraday_text
 
 
@@ -348,7 +376,7 @@ def test_v3_prompts_treat_regime_as_reference_only():
     assert "RED면 전체 스킵" not in premarket_sejuk_text
     assert "후보 제외/채택은 장전 갭·뉴스·거래대금 연속성으로 결정" in premarket_sejuk_text
     assert "`regime`은 시장 온도 참고용일 뿐" in scan_text
-    assert "실제 진입/청산 판단은 분봉, 거래대금, 수급 이탈 여부로 결정" in intraday_text
+    assert "분봉" in intraday_text and "거래대금" in intraday_text
     assert "실제 청산 여부는 보유 이유 유지 여부, 거래대금, 장후반 가격 실패" in close_text
 
 

@@ -869,10 +869,11 @@ def get_intraday_investor_rank(ctx: MILContext, phase: str) -> dict:
 
 
 def get_limit_up_stocks(ctx: MILContext, phase: str) -> dict:
-    """당일 상한가(29.9%) 또는 상한가 근접(25%↑) 종목 리스트.
+    """전일 20% 이상 상승한 강세 종목 리스트.
 
-    v4 세력주 매매의 핵심 탐지 도구. 등락률 순위 API(FHPST01700000)에서
-    change_pct >= 25% 종목을 추출한다. is_limit_up은 29% 이상 여부.
+    PREMARKET_SEJUK의 출발 후보를 상한가 전용이 아니라 전일 급등 강세주 전체로 확장한다.
+    등락률 순위 API(FHPST01700000)에서 change_pct >= 20% 종목을 추출한다.
+    is_limit_up은 29% 이상 여부만 참고용으로 표시한다.
     """
 
     def fetch():
@@ -900,7 +901,7 @@ def get_limit_up_stocks(ctx: MILContext, phase: str) -> dict:
         stocks = []
         for row in rows:
             change_pct = _to_float(row.get("prdy_ctrt"))
-            if change_pct < 25.0:
+            if change_pct < 20.0:
                 continue
             trading_value = _to_float(row.get("acml_tr_pbmn"))
             if trading_value == 0:

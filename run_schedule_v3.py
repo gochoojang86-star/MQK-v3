@@ -150,6 +150,12 @@ def run_scan() -> None:
     result = orch.run_scan_v3()
     logger.info(f"[v3 SCAN] watchlist={result.get('watchlist', [])}")
 
+    new_additions = result.get("new_watchlist_additions", [])
+    if new_additions:
+        logger.info(f"[v3 SCAN→INTRADAY] 신규 편입 {new_additions} — intraday 즉시 실행")
+        result2 = orch.run_intraday_v3()
+        logger.info(f"[v3 INTRADAY] action={result2.get('action')} reason={result2.get('reason', '')[:80]}")
+
 
 def run_intraday() -> None:
     _guard_trading_day()

@@ -42,10 +42,12 @@ class MILContext:
         phase: str,
         cache_args: dict,
         fetch_fn: Callable[[], Any],
+        force_refresh: bool = False,
     ) -> Any:
-        cached = self.cache.get(tool, phase, cache_args)
-        if cached is not None:
-            return cached
+        if not force_refresh:
+            cached = self.cache.get(tool, phase, cache_args)
+            if cached is not None:
+                return cached
 
         if self.circuit_breaker.is_open(tool):
             raise ToolFailure(f"{tool}: circuit breaker open")

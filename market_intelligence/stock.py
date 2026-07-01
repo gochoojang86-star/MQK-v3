@@ -713,7 +713,7 @@ def _coerce_market_cap(row: dict) -> float:
 def get_intraday_volume_trend(ctx: MILContext, phase: str, ticker: str) -> dict:
     """10분봉 기준 거래대금 트렌드 분석 — v4 세력 이탈 감지 핵심 도구.
 
-    최근 3봉 평균 거래대금 vs 직전 3봉 평균을 비교한다.
+    최근 5봉 평균 거래대금 vs 직전 5봉 평균을 비교한다.
     decline_pct <= -40% 이면 signal="VOLUME_DRY" (세력 이탈 신호).
     """
 
@@ -730,11 +730,11 @@ def get_intraday_volume_trend(ctx: MILContext, phase: str, ticker: str) -> dict:
         )
         candles = raw.get("output2", []) or []
         vols = []
-        for c in candles[:6]:
+        for c in candles[:10]:
             v = float(c.get("acml_tr_pbmn") or 0)
             vols.append(v)
 
-        if len(vols) < 6:
+        if len(vols) < 10:
             return {
                 "ticker": ticker,
                 "trend": "STABLE",
@@ -744,8 +744,8 @@ def get_intraday_volume_trend(ctx: MILContext, phase: str, ticker: str) -> dict:
                 "signal": None,
             }
 
-        recent_avg = sum(vols[:3]) / 3
-        prev_avg = sum(vols[3:6]) / 3
+        recent_avg = sum(vols[:5]) / 5
+        prev_avg = sum(vols[5:10]) / 5
         decline_pct = ((recent_avg - prev_avg) / prev_avg * 100) if prev_avg > 0 else 0.0
 
         if decline_pct <= -40.0:

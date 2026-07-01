@@ -10,12 +10,13 @@ from market_intelligence.base import MILContext
 def get_theme_candidates(
     ctx: MILContext,
     phase: str,
-    topn_themes: int = 5,
-    theme_date_tp: str = "10",
+    topn_themes: int = 10,
+    theme_date_tp: str = "1",
     component_date_tp: str = "2",
 ) -> dict:
-    """강한 테마 상위 그룹과 구성 종목 후보를 반환한다.
+    """오늘 강한 테마 상위 그룹과 구성 종목 후보를 반환한다.
 
+    date_tp="1"로 오늘 등락률 기준 정렬 (기간 수익률 기준이 아님).
     거래대금은 키움 응답의 현재가 × 누적거래량으로 근사한다.
     """
 
@@ -40,19 +41,24 @@ def get_theme_candidates(
             for row in groups
             if row.get("thema_grp_cd")
         ]
+        # 오늘 등락률 기준 정렬 — 기간 수익률이 아닌 당일 강세 테마 우선
         normalized_groups.sort(
-            key=lambda x: (x["theme_period_return_pct"], x["theme_change_pct"], x["rising_count"]),
+            key=lambda x: (x["theme_change_pct"], x["rising_count"]),
             reverse=True,
         )
 
         picked_themes = normalized_groups[:topn_themes]
         candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for group in picked_themes:
             comp = client.theme_components(group["theme_code"], date_tp=component_date_tp, stex_tp="1")
             for row in comp.get("thema_comp_stk", []) or []:
                 ticker = str(row.get("stk_cd") or "").strip()
                 if len(ticker) != 6 or not ticker.isdigit():
                     continue
+                if ticker in seen:
+                    continue
+                seen.add(ticker)
                 current_price = _to_float(row.get("cur_prc"))
                 volume = _to_float(row.get("acc_trde_qty"))
                 candidates.append(
@@ -71,10 +77,8 @@ def get_theme_candidates(
                     }
                 )
 
-        candidates.sort(
-            key=lambda x: (x["trading_value"], x["theme_period_return_pct"], x["change_pct"]),
-            reverse=True,
-        )
+        # 거래대금 기준 정렬 (당일 가장 큰 자금이 붙은 종목 우선)
+        candidates.sort(key=lambda x: x["trading_value"], reverse=True)
         return {
             "themes": picked_themes,
             "candidates": candidates,

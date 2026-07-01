@@ -1,6 +1,7 @@
 """market_intelligence/screening.py 테스트"""
 from market_intelligence.base import MILContext
 from market_intelligence.screening import (
+    get_limit_up_stocks,
     get_program_netbuy_rank,
     get_top_movers,
     psearch_result,
@@ -177,3 +178,22 @@ def test_get_program_netbuy_rank_filters_non_equity_products_and_sorts():
     result = get_program_netbuy_rank(ctx, "SCAN")
     assert [row["ticker"] for row in result["stocks"][:2]] == ["000660", "240810"]
     assert all("KODEX" not in row["name"] for row in result["stocks"])
+
+
+def test_get_limit_up_stocks_uses_20pct_threshold_for_premarket_sejuk():
+    ctx = make_ctx(
+        raw_responses={
+            "FHPST01700000": {
+                "output": [
+                    {"mksc_shrn_iscd": "111111", "hts_kor_isnm": "강세20", "prdy_ctrt": "20.00", "acml_tr_pbmn": "1000000000"},
+                    {"mksc_shrn_iscd": "222222", "hts_kor_isnm": "강세24", "prdy_ctrt": "24.50", "acml_tr_pbmn": "2000000000"},
+                    {"mksc_shrn_iscd": "333333", "hts_kor_isnm": "약세19", "prdy_ctrt": "19.99", "acml_tr_pbmn": "3000000000"},
+                ],
+            },
+        },
+    )
+
+    result = get_limit_up_stocks(ctx, "PREMARKET_SEJUK")
+
+    assert [row["ticker"] for row in result["stocks"]] == ["111111", "222222"]
+    assert result["stocks"][0]["is_limit_up"] is False

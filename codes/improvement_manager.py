@@ -88,14 +88,20 @@ class ImprovementManager:
                     requires_backtest INTEGER DEFAULT 1,
                     status          TEXT DEFAULT 'PENDING',
                     reject_reason   TEXT,
+                    review_comment  TEXT,
                     created_at      TEXT DEFAULT (datetime('now','localtime')),
-                    updated_at      TEXT
+                    updated_at      TEXT,
+                    reviewed_at     TEXT
                 )
             """)
-            # migration: add settings_patch if created before this column existed
+            # migration: add columns if the DB was created before they existed
             existing = {row[1] for row in conn.execute("PRAGMA table_info(proposals)")}
             if "settings_patch" not in existing:
                 conn.execute("ALTER TABLE proposals ADD COLUMN settings_patch TEXT DEFAULT '[]'")
+            if "review_comment" not in existing:
+                conn.execute("ALTER TABLE proposals ADD COLUMN review_comment TEXT")
+            if "reviewed_at" not in existing:
+                conn.execute("ALTER TABLE proposals ADD COLUMN reviewed_at TEXT")
 
     def save(self, proposal: ImprovementProposal) -> int:
         with self._conn() as conn:
@@ -140,6 +146,13 @@ class ImprovementManager:
                 (reason, datetime.now().isoformat(), proposal_id),
             )
         self.apply_approved_settings()
+
+    def review(self, proposal_id: int, comment: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE proposals SET review_comment=?, reviewed_at=?, updated_at=? WHERE id=?",
+                (comment, datetime.now().isoformat(), datetime.now().isoformat(), proposal_id),
+            )
 
     def process_telegram_actions(self) -> int:
         """텔레그램 인라인 버튼으로 들어온 개선 제안 승인/거부를 반영한다."""

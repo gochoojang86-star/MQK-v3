@@ -31,6 +31,8 @@ def test_get_market_context_combines_index_and_flow():
         index_status={
             "kospi": "2800.50", "kospi_change_pct": "0.75",
             "kosdaq": "850.10", "kosdaq_change_pct": "-0.30",
+            "kospi_trading_value": 38100850000000.0,
+            "kosdaq_trading_value": 7779160000000.0,
             "kospi_advancers": 500, "kospi_decliners": 350,
             "prev_kospi_change_pct": -8.29, "prev_kospi_trading_value": 48338891000000.0,
             "prev_kosdaq_change_pct": -9.08, "prev_kosdaq_trading_value": 8929291000000.0,
@@ -60,6 +62,8 @@ def test_get_market_context_combines_index_and_flow():
     )
     result = get_market_context(ctx, "PREMARKET")
     assert result["kospi"] == 2800.5
+    assert result["kospi_trading_value"] == 38100850000000.0
+    assert result["kosdaq_trading_value"] == 7779160000000.0
     assert result["foreign_net_buy_krw"] == -3000.0
     assert result["institution_net_buy_krw"] == 2000.0
     assert result["prev_kospi_change_pct"] == -8.29
@@ -97,12 +101,15 @@ def test_get_market_context_coerces_string_index_values():
             "FHPTJ04040000": {"output": []},
         },
         index_status={"kospi": "8342.33", "kosdaq": "1036.59",
-                       "kospi_change_pct": "7.45", "kospi_advancers": "782"},
+                       "kospi_change_pct": "7.45", "kospi_advancers": "782",
+                       "kospi_trading_value": "38100850000000", "kosdaq_trading_value": "7779160000000"},
     )
     result = get_market_context(ctx, "INTRADAY")
     assert result["kospi"] == 8342.33
     assert result["kospi_change_pct"] == 7.45
     assert result["kospi_advancers"] == 782
+    assert result["kospi_trading_value"] == 38100850000000.0
+    assert result["kosdaq_trading_value"] == 7779160000000.0
 
 
 def test_get_sector_breadth_parses_output():
