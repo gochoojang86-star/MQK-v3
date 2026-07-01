@@ -466,13 +466,29 @@ class MQKOrchestratorV3:
         context["market_story_brief"] = self._build_scan_market_story_brief()
 
         # 거래대금 폭증 종목 사전 탐지 (코드가 수집 → LLM이 검증)
+        # volume_surge가 None/빈 경우 change_rate_top으로 fallback — 등락률 강세주가 거래 폭증과 겹치는 경우가 많음
         try:
             volume_surge = mil_screening.get_volume_surge(self._mil, TradingPhase.SCAN.value)
-            # get_volume_surge는 "stocks" 키만 반환. "surge_top"은 존재하지 않음.
             stocks = volume_surge.get("stocks") or []
-            context["volume_surge_candidates"] = [s for s in stocks if s.get("ticker")]
+            surge_candidates = [s for s in stocks if s.get("ticker")]
         except Exception:
-            context["volume_surge_candidates"] = []
+            surge_candidates = []
+
+        if not surge_candidates:
+            try:
+                movers = mil_screening.get_top_movers(self._mil, TradingPhase.SCAN.value)
+                surge_candidates = [
+                    {"ticker": r.get("ticker"), "name": r.get("name"), "change_pct": r.get("change_pct"),
+                     "surge_rate_pct": None, "source": "change_rate_fallback"}
+                    for r in (movers.get("change_rate_top") or [])[:10]
+                    if r.get("ticker")
+                ]
+                if surge_candidates:
+                    logger.info("[SCAN] volume_surge 없음 — change_rate_top fallback 사용")
+            except Exception:
+                pass
+
+        context["volume_surge_candidates"] = surge_candidates
 
         # 종목 뉴스 사전 주입 — pool 상위 8개 종목의 뉴스를 코드가 수집해 facts에 embed.
         # LLM이 get_news_stock을 건너뛰더라도 촉매 판단 근거가 context에 이미 존재한다.
@@ -486,6 +502,12 @@ class MQKOrchestratorV3:
         else:
             result = self._apply_scan_diversity_guard(result, context)
         save_watchlist(self._watchlist_entries_from_scan_result(result), path=_WATCHLIST_PATH)
+        # 디버깅용 저장 — candidate_pool 핵심 facts + market_story_brief
+        result["_debug_candidate_pool"] = [
+            {"ticker": p.get("ticker"), "name": p.get("name"), "why": p.get("why_in_pool"), "change_pct": p.get("facts", {}).get("change_pct")}
+            for p in context.get("candidate_pool", [])
+        ]
+        result["_debug_market_story_brief"] = context.get("market_story_brief", {})
         self._save_json("scan_v3.json", result)
         return result
 
@@ -1109,19 +1131,29 @@ class MQKOrchestratorV3:
                 item["facts"]["change_pct"] = row.get("change_pct")
                 item["facts"]["trading_value_krw"] = row.get("trading_value_krw")
                 item["why_in_pool"].append("trading_value_top")
+            # 등락률 상위 — 거래대금이 크지 않아도 강세인 테마 대장주 포착
+            # (전선/전력처럼 대형주 섹터에 묻혀 거래대금 순위가 낮게 나오는 종목 커버)
+            for idx, row in enumerate((movers.get("change_rate_top") or [])[:8], start=1):
+                ticker = str(row.get("ticker") or "").strip()
+                if not ticker:
+                    continue
+                item = _entry(ticker, row.get("name"))
+                if item["facts"]["change_pct"] is None:
+                    item["facts"]["change_pct"] = row.get("change_pct")
+                item["why_in_pool"].append("change_rate_top")
         except Exception as e:
             logger.warning(f"[SCAN POOL] top_movers 실패: {e}")
 
         try:
             attention = mil_screening.get_attention_rank(self._mil, phase)
-            for row in (attention.get("kiwoom_viewing_rank") or [])[:10]:
+            for row in (attention.get("kiwoom_viewing_rank") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["attention_rank"] = row.get("rank")
                 item["why_in_pool"].append("attention_rank")
-            for idx, ticker in enumerate((attention.get("kis_hts_top") or [])[:10], start=1):
+            for idx, ticker in enumerate((attention.get("kis_hts_top") or [])[:20], start=1):
                 code = str(ticker or "").strip()
                 if not code:
                     continue
@@ -1193,7 +1225,7 @@ class MQKOrchestratorV3:
 
         try:
             themes = mil_theme.get_theme_candidates(self._mil, phase)
-            for row in (themes.get("candidates") or [])[:20]:
+            for row in (themes.get("candidates") or [])[:30]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1396,6 +1428,11 @@ class MQKOrchestratorV3:
                     "max_new_tickers": 2,
                     "require_strong_evidence": True,
                     "discovery_priority": "watchlist_first_then_new_leaders",
+                    "volume_trend_use_averages": True,
+                    "leader_reentry_confidence_floor": max(
+                        REGIME_SAFETY_BOUNDS.min_buy_confidence_threshold,
+                        float(risk_guidance.get("buy_confidence_threshold", 75.0)) - 5.0,
+                    ),
                 }
                 if phase == TradingPhase.INTRADAY
                 else None
@@ -1892,6 +1929,8 @@ class MQKOrchestratorV3:
             "setup": _normalize_setup_name(proposal.get("setup")),
             "theme": theme,
             "cluster": proposal.get("cluster") or "",
+            "role": proposal.get("role") or "",
+            "theme_evidence": proposal.get("theme_evidence") or [],
             "confidence": proposal.get("confidence", 0),
             "reason": proposal.get("reason", ""),
             "current_price": current_price,
@@ -1905,6 +1944,8 @@ class MQKOrchestratorV3:
         user_msg = (
             "MQK soul 전략 기준 최종 매수 재판단이다.\n"
             "후발주, 약한 2등주, 과도한 추격은 거부하고 진짜 본류 대장 또는 고품질 리더 진입만 승인하라.\n"
+            "단, role=본류 대장주인 재진입 눌림은 최근 평균 거래대금이 유지되고 과도한 고점 추격이 아니면 confidence 70~74 구간도 기계적으로 거부하지 마라.\n"
+            "직전 1개 봉 거래대금 약화만으로는 거부 근거가 부족하며, 평균 거래대금 추세와 눌림 후 재정착을 우선 보라.\n"
             "리뷰 실패 시 시스템은 fail-open으로 진행하므로, 판단 가능할 때만 명확히 거부하라.\n\n"
             f"proposal={json.dumps(review_payload, ensure_ascii=False)}\n"
             f"portfolio={json.dumps(portfolio_payload, ensure_ascii=False)}\n\n"
@@ -2066,6 +2107,25 @@ class MQKOrchestratorV3:
         market_context = mil_market.get_market_context(self._mil, TradingPhase.PREMARKET.value)
         breadth_data = mil_market.get_sector_breadth(self._mil, TradingPhase.PREMARKET.value)
         news_payload = mil_market.get_news_market(self._mil, TradingPhase.PREMARKET.value)
+        try:
+            sector_flow = mil_screening.get_sector_investor_flow(self._mil, TradingPhase.PREMARKET.value)
+        except Exception as e:
+            logger.warning(f"[V3 PREMARKET] 장전 업종 수급 조회 실패 — 레짐 판단에서 제외: {e}")
+            sector_flow = {"sectors": None, "missing_fields": [f"sector_investor_flow({e})"]}
+        try:
+            program_rank = mil_screening.get_program_netbuy_rank(self._mil, TradingPhase.PREMARKET.value)
+        except Exception as e:
+            logger.warning(f"[V3 PREMARKET] 장전 프로그램 수급 조회 실패 — 레짐 판단에서 제외: {e}")
+            program_rank = {"stocks": None, "missing_fields": [f"program_netbuy_rank({e})"]}
+        try:
+            foreign_inst_rank = mil_screening.get_foreign_institution_rank(self._mil, TradingPhase.PREMARKET.value)
+        except Exception as e:
+            logger.warning(f"[V3 PREMARKET] 장전 외인/기관 수급 조회 실패 — 레짐 판단에서 제외: {e}")
+            foreign_inst_rank = {
+                "foreign_netbuy_top": None,
+                "institution_netbuy_top": None,
+                "missing_fields": [f"foreign_institution_rank({e})"],
+            }
         market_news_summary = " | ".join(
             str(item.get("title") or "")
             for item in (news_payload.get("headlines") or [])[:5]
@@ -2102,6 +2162,48 @@ class MQKOrchestratorV3:
             "prev_kosdaq_trading_value": _to_float(market_context.get("prev_kosdaq_trading_value")),
             "market_news_summary": market_news_summary,
             "sector_performance": self._sector_performance,
+            "premarket_flow": {
+                "sector_investor_flow_top": [
+                    {
+                        "sector_name": row.get("sector_name"),
+                        "change_pct": row.get("change_pct"),
+                        "institution_net": row.get("institution_net"),
+                        "foreign_net": row.get("foreign_net"),
+                    }
+                    for row in (sector_flow.get("sectors") or [])[:5]
+                ],
+                "program_netbuy_top": [
+                    {
+                        "ticker": row.get("ticker"),
+                        "name": row.get("name"),
+                        "program_netbuy_amount_mnkrw": row.get("program_netbuy_amount_mnkrw"),
+                    }
+                    for row in (program_rank.get("stocks") or [])[:5]
+                ],
+                "foreign_netbuy_top": [
+                    {
+                        "ticker": row.get("ticker"),
+                        "name": row.get("name"),
+                        "netbuy_amount": row.get("netbuy_amount"),
+                    }
+                    for row in (foreign_inst_rank.get("foreign_netbuy_top") or [])[:5]
+                ],
+                "institution_netbuy_top": [
+                    {
+                        "ticker": row.get("ticker"),
+                        "name": row.get("name"),
+                        "netbuy_amount": row.get("netbuy_amount"),
+                    }
+                    for row in (foreign_inst_rank.get("institution_netbuy_top") or [])[:5]
+                ],
+                "missing_fields": sorted(
+                    {
+                        *list(sector_flow.get("missing_fields") or []),
+                        *list(program_rank.get("missing_fields") or []),
+                        *list(foreign_inst_rank.get("missing_fields") or []),
+                    }
+                ),
+            },
         }
 
         # OPENING 레짐에만 미국 증시 데이터 추가 (야간 나스닥/S&P500/VIX/환율)
@@ -2141,6 +2243,7 @@ class MQKOrchestratorV3:
             "prev_kosdaq_change_pct": _to_float(market_context.get("prev_kosdaq_change_pct")),
             "prev_kospi_trading_value": _to_float(market_context.get("prev_kospi_trading_value")),
             "prev_kosdaq_trading_value": _to_float(market_context.get("prev_kosdaq_trading_value")),
+            "premarket_flow": market_ctx.get("premarket_flow", {}),
             "status": regime.status.value,
             "regime": regime.regime.value,
             "confidence": regime.confidence,
