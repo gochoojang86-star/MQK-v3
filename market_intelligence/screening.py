@@ -120,7 +120,7 @@ def get_top_movers(ctx: MILContext, phase: str) -> dict:
                 "volume": _to_float(row.get("acml_vol")),
                 "trading_value_krw": _to_float(row.get("acml_tr_pbmn")),
             }
-            for row in trading_value_rows[:20]
+            for row in trading_value_rows[:50]
         ]
         trading_value_stock_top = [
             row for row in trading_value_top
@@ -201,7 +201,7 @@ def get_top_movers(ctx: MILContext, phase: str) -> dict:
                     # 등락률 순위 API 응답에 거래대금 필드가 없어 거래량×현재가로 근사
                     "trading_value_krw": _to_float(row.get("acml_vol")) * _to_float(row.get("stck_prpr")),
                 }
-                for row in change_rows[:20]
+                for row in change_rows[:30]
             ]
             if not change_rows:
                 missing_fields.append("change_rate_top")

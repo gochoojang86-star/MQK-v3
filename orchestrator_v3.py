@@ -1122,7 +1122,7 @@ class MQKOrchestratorV3:
 
         try:
             movers = mil_screening.get_top_movers(self._mil, phase)
-            for idx, row in enumerate((movers.get("trading_value_stock_top") or [])[:8], start=1):
+            for idx, row in enumerate((movers.get("trading_value_stock_top") or [])[:40], start=1):
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1133,7 +1133,7 @@ class MQKOrchestratorV3:
                 item["why_in_pool"].append("trading_value_top")
             # 등락률 상위 — 거래대금이 크지 않아도 강세인 테마 대장주 포착
             # (전선/전력처럼 대형주 섹터에 묻혀 거래대금 순위가 낮게 나오는 종목 커버)
-            for idx, row in enumerate((movers.get("change_rate_top") or [])[:8], start=1):
+            for idx, row in enumerate((movers.get("change_rate_top") or [])[:20], start=1):
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1146,14 +1146,14 @@ class MQKOrchestratorV3:
 
         try:
             attention = mil_screening.get_attention_rank(self._mil, phase)
-            for row in (attention.get("kiwoom_viewing_rank") or [])[:20]:
+            for row in (attention.get("kiwoom_viewing_rank") or [])[:30]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["attention_rank"] = row.get("rank")
                 item["why_in_pool"].append("attention_rank")
-            for idx, ticker in enumerate((attention.get("kis_hts_top") or [])[:20], start=1):
+            for idx, ticker in enumerate((attention.get("kis_hts_top") or [])[:30], start=1):
                 code = str(ticker or "").strip()
                 if not code:
                     continue
@@ -1166,7 +1166,7 @@ class MQKOrchestratorV3:
 
         try:
             program = mil_screening.get_program_netbuy_rank(self._mil, phase)
-            for idx, row in enumerate((program.get("stocks") or [])[:8], start=1):
+            for idx, row in enumerate((program.get("stocks") or [])[:20], start=1):
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1180,14 +1180,14 @@ class MQKOrchestratorV3:
 
         try:
             fi = mil_screening.get_foreign_institution_rank(self._mil, phase)
-            for row in (fi.get("foreign_netbuy_top") or [])[:8]:
+            for row in (fi.get("foreign_netbuy_top") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["foreign_netbuy"] = True
                 item["why_in_pool"].append("foreign_netbuy")
-            for row in (fi.get("institution_netbuy_top") or [])[:8]:
+            for row in (fi.get("institution_netbuy_top") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1199,7 +1199,7 @@ class MQKOrchestratorV3:
 
         try:
             cont = mil_screening.get_foreign_continuous_rank(self._mil, phase)
-            for idx, row in enumerate((cont.get("stocks") or [])[:8], start=1):
+            for idx, row in enumerate((cont.get("stocks") or [])[:20], start=1):
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1211,7 +1211,7 @@ class MQKOrchestratorV3:
 
         try:
             surge = mil_screening.get_volume_surge(self._mil, phase)
-            for row in (surge.get("stocks") or [])[:8]:
+            for row in (surge.get("stocks") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1225,7 +1225,7 @@ class MQKOrchestratorV3:
 
         try:
             themes = mil_theme.get_theme_candidates(self._mil, phase)
-            for row in (themes.get("candidates") or [])[:30]:
+            for row in (themes.get("candidates") or [])[:40]:
                 ticker = str(row.get("ticker") or "").strip()
                 if not ticker:
                     continue
@@ -1261,7 +1261,7 @@ class MQKOrchestratorV3:
         )
         diversified = _diversify_by_theme(
             candidates,
-            limit=20,
+            limit=40,
             theme_key=lambda item: (item["facts"]["theme_hints"] or [""])[0],
         )
         return diversified

@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 
 from agents.trading_agent import TradingPhase
-from codes.risk_officer import RiskViolation
+from codes.risk_officer import RiskOfficer, RiskViolation
 from market_intelligence.circuit_breaker import CircuitBreaker
 from orchestrator_v3 import (
     MQKOrchestratorV3,
+    _diversify_by_theme,
     _resolve_regime_evaluation_mode,
     load_drift_state,
     load_next_day_premarket_context,
@@ -173,6 +174,41 @@ def test_load_watchlist_returns_empty_when_missing(tmp_path):
     assert load_watchlist(path=tmp_path / "missing.json") == []
 
 
+def test_summarize_intraday_actions_counts_tool_history_ticks(tmp_path):
+    orch = make_orchestrator(tmp_path)
+
+    (tmp_path / "intraday_v3_090000.json").write_text(
+        json.dumps(
+            {
+                "action": "HOLD",
+                "reason": "관망",
+                "tool_history": [
+                    {
+                        "tool": "get_watchlist_intraday_snapshot",
+                        "args": {"tickers": ["005930"]},
+                        "result": {"snapshots": [{"ticker": "005930"}]},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "intraday_v3_091000.json").write_text(
+        json.dumps({"action": "NO_TRADE", "reason": "조건 미충족"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    summary = orch._summarize_intraday_actions()
+
+    assert summary["total_ticks"] == 2
+    assert summary["tool_called_ticks"] == 1
+    assert summary["no_tool_ticks"] == 1
+    assert summary["action_counts"]["HOLD"] == 1
+    assert summary["action_counts"]["NO_TRADE"] == 1
+    assert summary["assessment"] == "정상 도구 활용"
+
+
 # ── Important 6: corrupt JSON state files must not crash loaders ───────────
 
 def test_load_drift_state_returns_default_on_corrupt_json(tmp_path):
@@ -330,6 +366,76 @@ def test_collect_drift_snapshot_returns_none_when_kospi_is_none(monkeypatch, tmp
 
     orch = make_orchestrator(tmp_path)
     assert orch._collect_drift_snapshot() is None
+
+
+def test_evaluate_regime_v3_injects_premarket_flow_into_regime_context(monkeypatch, tmp_path):
+    import market_intelligence.market as mil_market
+    import market_intelligence.screening as mil_screening
+
+    monkeypatch.setattr(mil_market, "get_market_context", lambda ctx, phase: {
+        "kospi_change_pct": 0.5,
+        "kosdaq_change_pct": 0.3,
+        "kospi_trading_value": 1_000_000_000,
+        "kosdaq_trading_value": 800_000_000,
+        "prev_kospi_change_pct": -0.2,
+        "prev_kosdaq_change_pct": 0.1,
+        "prev_kospi_trading_value": 900_000_000,
+        "prev_kosdaq_trading_value": 700_000_000,
+        "kospi": 2700.0,
+        "kosdaq": 900.0,
+    })
+    monkeypatch.setattr(mil_market, "get_sector_breadth", lambda ctx, phase: {
+        "market_breadth": {"advancers": 500, "decliners": 300},
+        "sectors": [],
+    })
+    monkeypatch.setattr(mil_market, "get_news_market", lambda ctx, phase: {"headlines": [{"title": "headline"}]})
+    monkeypatch.setattr(mil_market, "get_us_market_context", lambda ctx, phase: {"nasdaq": 1})
+    monkeypatch.setattr(mil_screening, "get_sector_investor_flow", lambda ctx, phase: {
+        "sectors": [{"sector_name": "반도체", "change_pct": 1.2, "institution_net": 1000, "foreign_net": 900}],
+        "missing_fields": [],
+    })
+    monkeypatch.setattr(mil_screening, "get_program_netbuy_rank", lambda ctx, phase: {
+        "stocks": [{"ticker": "000660", "name": "SK하이닉스", "program_netbuy_amount_mnkrw": 55555}],
+        "missing_fields": [],
+    })
+    monkeypatch.setattr(mil_screening, "get_foreign_institution_rank", lambda ctx, phase: {
+        "foreign_netbuy_top": [{"ticker": "005930", "name": "삼성전자", "netbuy_amount": 33333}],
+        "institution_netbuy_top": [{"ticker": "000660", "name": "SK하이닉스", "netbuy_amount": 22222}],
+        "missing_fields": [],
+    })
+
+    class StubRegimeAgent:
+        def __init__(self):
+            self.last_market_ctx = None
+
+        def judge(self, market_ctx, evaluation_mode="OPENING", evaluation_time=None, prev_regime=None):
+            self.last_market_ctx = market_ctx
+            return type("Regime", (), {
+                "status": type("Status", (), {"value": "GREEN"})(),
+                "regime": type("RegimeValue", (), {"value": "UPTREND"})(),
+                "confidence": 81,
+                "reason": "ok",
+                "risk_notes": [],
+                "opportunity_mode": type("Mode", (), {"value": "NORMAL"})(),
+                "scanner_mode": type("Scanner", (), {"value": "TREND"})(),
+                "risk_guidance": {"buy_confidence_threshold": 75},
+                "drift_triggers": [],
+                "cooldown_minutes": 60,
+                "max_daily_triggers": 3,
+            })()
+
+    orch = make_orchestrator(tmp_path)
+    orch._regime_agent = StubRegimeAgent()
+    orch.warm_atr_cache = lambda: None
+    orch._telegram = type("_Telegram", (), {"notify": lambda self, msg: None})()
+
+    status = orch._evaluate_regime_v3()
+
+    flow = orch._regime_agent.last_market_ctx["premarket_flow"]
+    assert flow["sector_investor_flow_top"][0]["sector_name"] == "반도체"
+    assert flow["program_netbuy_top"][0]["ticker"] == "000660"
+    assert flow["foreign_netbuy_top"][0]["ticker"] == "005930"
+    assert status["premarket_flow"]["institution_netbuy_top"][0]["ticker"] == "000660"
 
 
 def test_run_intraday_v3_degrades_when_snapshot_unavailable(monkeypatch, tmp_path):
@@ -593,6 +699,130 @@ def test_run_scan_v3_backfills_watchlist_when_agent_returns_empty(monkeypatch, t
     assert result["overheated_bias_warning"] is True
     assert "orchestrator_scan_backfill" in result["reason"]
     assert load_watchlist(path=tmp_path / "watchlist.json") == ["357780"]
+
+
+# ── 멀티테마 다양성 (watchlist 단일 테마 쏠림 방지) ──────────────────────────
+
+def test_diversify_by_theme_keeps_minority_theme_when_one_theme_dominates_score():
+    # 반도체가 점수 상위를 모두 휩쓸지만, 2차전지/방산도 강한 후보를 가진 상황.
+    candidates = (
+        [{"ticker": f"sem{i}", "theme": "반도체"} for i in range(8)]
+        + [{"ticker": "batt1", "theme": "2차전지"}]
+        + [{"ticker": "def1", "theme": "방산"}]
+    )
+
+    selected = _diversify_by_theme(candidates, limit=6, theme_key=lambda c: c["theme"])
+
+    themes = {c["theme"] for c in selected}
+    assert len(selected) == 6
+    assert "2차전지" in themes
+    assert "방산" in themes
+    assert themes != {"반도체"}
+
+
+def test_diversify_by_theme_respects_explicit_cap_per_theme():
+    candidates = [{"ticker": f"a{i}", "theme": "A"} for i in range(5)] + [
+        {"ticker": f"b{i}", "theme": "B"} for i in range(5)
+    ]
+
+    selected = _diversify_by_theme(candidates, limit=4, theme_key=lambda c: c["theme"], cap_per_theme=2)
+
+    counts: dict[str, int] = {}
+    for c in selected:
+        counts[c["theme"]] = counts.get(c["theme"], 0) + 1
+    assert counts == {"A": 2, "B": 2}
+
+
+def test_diversify_by_theme_backfills_with_leftovers_when_themes_scarce():
+    # 테마가 1개뿐이면 quota 때문에 결과 개수가 줄어들지 않아야 한다.
+    candidates = [{"ticker": f"x{i}", "theme": "반도체"} for i in range(6)]
+
+    selected = _diversify_by_theme(candidates, limit=6, theme_key=lambda c: c["theme"])
+
+    assert len(selected) == 6
+
+
+def test_diversify_by_theme_does_not_cap_untagged_items():
+    candidates = [{"ticker": f"u{i}", "theme": ""} for i in range(6)]
+
+    selected = _diversify_by_theme(candidates, limit=6, theme_key=lambda c: c["theme"])
+
+    assert len(selected) == 6
+
+
+def test_backfill_scan_result_diversifies_across_themes_when_multiple_are_strong(monkeypatch, tmp_path):
+    import market_intelligence.theme as mil_theme
+    import market_intelligence.screening as mil_screening
+    import market_intelligence.risk_filter as mil_risk_filter
+
+    ticker_theme = {
+        "000010": "반도체", "000011": "반도체", "000012": "반도체",
+        "000013": "반도체", "000014": "반도체",
+        "000020": "2차전지", "000021": "2차전지",
+        "000030": "방산",
+    }
+    monkeypatch.setattr(mil_theme, "get_theme_candidates", lambda ctx, phase: {
+        "candidates": [
+            {"ticker": "000010", "name": "반도체A", "change_pct": 20.0, "trading_value": 500_000_000_000, "theme_name": "반도체"},
+            {"ticker": "000011", "name": "반도체B", "change_pct": 19.0, "trading_value": 480_000_000_000, "theme_name": "반도체"},
+            {"ticker": "000012", "name": "반도체C", "change_pct": 18.0, "trading_value": 460_000_000_000, "theme_name": "반도체"},
+            {"ticker": "000013", "name": "반도체D", "change_pct": 17.0, "trading_value": 440_000_000_000, "theme_name": "반도체"},
+            {"ticker": "000014", "name": "반도체E", "change_pct": 16.0, "trading_value": 420_000_000_000, "theme_name": "반도체"},
+            {"ticker": "000020", "name": "2차전지A", "change_pct": 15.0, "trading_value": 200_000_000_000, "theme_name": "2차전지"},
+            {"ticker": "000021", "name": "2차전지B", "change_pct": 14.0, "trading_value": 190_000_000_000, "theme_name": "2차전지"},
+            {"ticker": "000030", "name": "방산A", "change_pct": 13.0, "trading_value": 150_000_000_000, "theme_name": "방산"},
+        ]
+    })
+    monkeypatch.setattr(mil_screening, "get_top_movers", lambda ctx, phase: {"change_rate_top": []})
+    monkeypatch.setattr(mil_risk_filter, "get_stock_status", lambda ctx, phase, ticker: {
+        "ticker": ticker, "trading_halted": False, "administrative_issue": False, "is_limit_up": False,
+    })
+
+    orch = make_orchestrator(tmp_path)
+    context = {
+        "risk_guidance": {"min_trading_value_krw": 12_000_000_000},
+        "risk_budget_remaining": {"monitoring_slots": 6},
+        "watchlist": [],
+    }
+
+    result = orch._backfill_scan_result({"watchlist": []}, context)
+
+    themes_in_watchlist = {ticker_theme[t] for t in result["watchlist"]}
+    assert len(result["watchlist"]) == 6
+    assert themes_in_watchlist != {"반도체"}
+    assert "2차전지" in themes_in_watchlist
+    assert "방산" in themes_in_watchlist
+
+
+def test_build_scan_candidate_pool_keeps_minority_themes_when_one_theme_outnumbers(monkeypatch, tmp_path):
+    import market_intelligence.theme as mil_theme
+    import market_intelligence.screening as mil_screening
+
+    # 테마 후보 20개(반도체16 + 2차전지2 + 방산2)에 더해, 거래대금 상위에는
+    # 테마 미분류 반도체 종목 8개가 추가로 잡혀 점수 경쟁에서 항상 앞서는 상황을 재현.
+    sem_theme_rows = [{"ticker": f"1{i:05d}", "name": f"반도체{i}", "theme_name": "반도체"} for i in range(16)]
+    batt_rows = [{"ticker": f"2{i:05d}", "name": f"2차전지{i}", "theme_name": "2차전지"} for i in range(2)]
+    def_rows = [{"ticker": f"3{i:05d}", "name": f"방산{i}", "theme_name": "방산"} for i in range(2)]
+    sem_tv_rows = [{"ticker": f"4{i:05d}", "name": f"반도체TV{i}"} for i in range(8)]
+
+    monkeypatch.setattr(
+        mil_theme, "get_theme_candidates",
+        lambda ctx, phase: {"candidates": sem_theme_rows + batt_rows + def_rows},
+    )
+    monkeypatch.setattr(mil_screening, "get_top_movers", lambda ctx, phase: {"trading_value_stock_top": sem_tv_rows})
+    monkeypatch.setattr(mil_screening, "get_attention_rank", lambda ctx, phase: {"kiwoom_viewing_rank": [], "kis_hts_top": []})
+    monkeypatch.setattr(mil_screening, "get_program_netbuy_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_institution_rank", lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_continuous_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_volume_surge", lambda ctx, phase: {"stocks": []})
+
+    orch = make_orchestrator(tmp_path)
+    pool = orch._build_scan_candidate_pool()
+
+    assert len(pool) <= 40
+    theme_hints = {hint for item in pool for hint in item["facts"]["theme_hints"]}
+    assert "2차전지" in theme_hints
+    assert "방산" in theme_hints
 
 
 def test_run_scan_v3_keeps_monitoring_watchlist_when_positions_full(monkeypatch, tmp_path):
@@ -948,6 +1178,8 @@ def test_run_intraday_v3_stable_executes_no_trade(monkeypatch, tmp_path):
     ]
     assert orch._trading_agent.calls[0][1]["watchlist_tickers"] == ["005930"]
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["allow_intraday_discovery"] is True
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["volume_trend_use_averages"] is True
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] == 70.0
     saved_drift = json.loads((tmp_path / "drift_state.json").read_text(encoding="utf-8"))
     assert saved_drift["today_caution_count"] == 0
 
@@ -1782,6 +2014,122 @@ def test_process_v3_buy_proposal_rejected_by_buy_review(tmp_path, monkeypatch):
     assert result["action"] == "REJECTED"
     assert result["reason"] == "weak follower"
     assert orch._order_manager.buy_calls == []
+
+
+# ── 테마 노출 가드: 실제 watchlist 테마 wiring으로 MAX_THEME_EXPOSURE 차단 ──────
+
+def test_process_v3_buy_proposal_blocked_by_theme_exposure_with_real_theme_wiring(tmp_path, monkeypatch):
+    """theme="V3" 하드코딩이 아니라 watchlist.json의 실제 theme로 RiskOfficer가 차단해야 한다."""
+    import orchestrator_v3
+    watchlist_path = tmp_path / "watchlist.json"
+    monkeypatch.setattr(orchestrator_v3, "_WATCHLIST_PATH", watchlist_path)
+    save_watchlist(
+        [
+            {"ticker": "000660", "setup": "TREND", "confidence": 80, "reason": "보유 중", "theme": "반도체"},
+            {"ticker": "005930", "setup": "TREND", "confidence": 80, "reason": "신규 후보", "theme": "반도체"},
+        ],
+        path=watchlist_path,
+    )
+
+    orch = make_orchestrator(tmp_path)
+    orch._risk_officer = RiskOfficer()  # 실제 RiskOfficer — 가짜로 우회하지 않는다
+    orch._position_sizer = FakePositionSizer()
+    orch._telegram = FakeTelegramApproval(approved=True)
+    orch._order_manager = FakeOrderManager()
+    monkeypatch.setattr(orch, "_estimate_atr", lambda ticker: 1500.0)
+
+    class FakeSnapshot:
+        current_price = 70000.0
+
+    monkeypatch.setattr(orch, "_market_data", type("MD", (), {"get_snapshot": staticmethod(lambda t: FakeSnapshot())})())
+    orch._kis_api = type(
+        "_KIS",
+        (),
+        {
+            "get_balance": lambda self: {
+                # 000660 보유 중: 평가금액 3,500,000 / 총자산 10,000,000 = 35% (반도체 테마)
+                "output1": [
+                    {"pdno": "000660", "hldg_qty": "50", "pchs_avg_pric": "60000",
+                     "prpr": "70000", "evlu_amt": "3500000"},
+                ],
+                "output2": [{"tot_evlu_amt": "10000000", "ord_psbl_cash": "6500000"}],
+            }
+        },
+    )()
+
+    # FakePositionSizer: quantity=10, entry_price=70000 → 추가 7% (35%+7%=42% > 40% 한도)
+    proposal = {"ticker": "005930", "side": "BUY", "confidence": 82, "stop_loss_price": 68000, "reason": "추격 진입"}
+    result = orch._process_v3_buy_proposal(proposal)
+
+    assert result["action"] == "BLOCKED"
+    assert "MAX_THEME_EXPOSURE" in result["reason"]
+    assert "반도체" in result["reason"]
+    assert orch._order_manager.buy_calls == []
+
+
+# ── SCAN 1차(LLM) 결과 다양성 가드 (단일 테마 쏠림 방지) ──────────────────────
+
+def test_run_scan_v3_diversifies_primary_llm_watchlist_when_multiple_themes_strong(monkeypatch, tmp_path):
+    """LLM이 final로 낸 비어있지 않은 watchlist도 candidate_pool에 다른 강한 테마가
+    있으면 단일 테마로 수렴하지 않아야 한다 (backfill/fallback 경로뿐 아니라 1차 경로도)."""
+    import market_intelligence.portfolio as mil_portfolio
+    import market_intelligence.screening as mil_screening
+    import market_intelligence.market as mil_market
+    import market_intelligence.theme as mil_theme
+
+    monkeypatch.setattr(mil_portfolio, "get_open_positions",
+                         lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl",
+                         lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 10_000_000})
+    monkeypatch.setattr(mil_market, "get_market_context", lambda ctx, phase: {"kospi": 2700.0})
+    monkeypatch.setattr(mil_market, "get_sector_breadth", lambda ctx, phase: {"market_breadth": {}})
+    monkeypatch.setattr(mil_market, "get_news_market", lambda ctx, phase: {"headlines": []})
+    monkeypatch.setattr(mil_theme, "get_theme_candidates", lambda ctx, phase: {
+        "candidates": [
+            {"ticker": "200001", "name": "2차전지A", "theme_name": "2차전지"},
+            {"ticker": "300001", "name": "방산A", "theme_name": "방산"},
+        ]
+    })
+    monkeypatch.setattr(mil_screening, "get_top_movers", lambda ctx, phase: {"trading_value_stock_top": []})
+    monkeypatch.setattr(mil_screening, "get_attention_rank", lambda ctx, phase: {"kiwoom_viewing_rank": [], "kis_hts_top": []})
+    monkeypatch.setattr(mil_screening, "get_program_netbuy_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_institution_rank", lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_continuous_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_volume_surge", lambda ctx, phase: {"stocks": []})
+
+    orch = make_orchestrator(tmp_path)
+    orch._trading_agent = FakeTradingAgent({
+        "next_action": "final",
+        "action": "WATCHLIST_UPDATE",
+        "watchlist": ["100001", "100002", "100003", "100004"],
+        "candidates": [
+            {"ticker": "100001", "setup": "TREND", "confidence": 85, "reason": "llm pick", "theme": "반도체"},
+            {"ticker": "100002", "setup": "TREND", "confidence": 84, "reason": "llm pick", "theme": "반도체"},
+            {"ticker": "100003", "setup": "TREND", "confidence": 83, "reason": "llm pick", "theme": "반도체"},
+            {"ticker": "100004", "setup": "TREND", "confidence": 82, "reason": "llm pick", "theme": "반도체"},
+        ],
+        "reason": "ok",
+    })
+
+    regime = {
+        "status": "GREEN", "regime": "THEME_MARKET", "confidence": 80,
+        "risk_guidance": {"max_positions": 4, "buy_confidence_threshold": 75,
+                           "risk_per_trade_pct": 0.35, "min_trading_value_krw": 1_000_000},
+        "timestamp": "2026-06-09T09:03:00",
+    }
+    (tmp_path / "last_regime.json").write_text(json.dumps(regime), encoding="utf-8")
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    result = orch.run_scan_v3()
+
+    saved_entries = load_watchlist_entries(path=tmp_path / "watchlist.json")
+    themes = {e.get("theme") for e in saved_entries}
+    assert len(result["watchlist"]) == 4
+    assert themes != {"반도체"}
+    assert "2차전지" in themes or "방산" in themes
 
 
 def test_v3_orchestrator_source_does_not_contain_v4_premarket_sejuk_log_label():
