@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from config.settings import RISK
+
 _DEFAULT_DB = Path(__file__).parent.parent / "data" / "trades.db"
 
 
@@ -297,6 +299,48 @@ class TradeJournal:
                 f"UPDATE trades SET {', '.join(updates)} WHERE id=?",
                 params,
             )
+
+    def reconcile_open_positions(self, broker_positions: list[dict]) -> list[str]:
+        """브로커가 실제 보유 중인데 저널엔 없는 종목을 open_trade로 백필한다.
+
+        2026-07-02 사고: 브로커(모의계좌)엔 실제 보유 중인 종목이 있었는데 저널에
+        진입 기록이 없어 CLOSE phase의 SELL 처리와 코드 레벨 하드 스톱로스가 모두
+        해당 종목을 인식하지 못했다 (둘 다 저널을 유일한 진실의 원천으로 사용).
+        매수 주문이 저널 기록 없이 체결되는 경로(수동 매수, 저널 기록 전 프로세스
+        종료 등)가 있는 한 이 드리프트는 재발할 수 있으므로, 반복 호출해 항상
+        브로커 잔고 기준으로 누락분을 메꾼다.
+
+        이미 저널에 있는 종목은 절대 덮어쓰지 않는다 — 수량/평단가 불일치 자체가
+        더 깊은 버그의 신호일 수 있어 자동 정정하지 않고 그대로 둔다.
+        """
+        tracked = {pos["ticker"] for pos in self.get_open_positions()}
+        backfilled: list[str] = []
+        for pos in broker_positions:
+            ticker = str(pos.get("ticker") or "").strip()
+            quantity = int(pos.get("quantity") or 0)
+            if not ticker or quantity <= 0 or ticker in tracked:
+                continue
+            avg_price = float(pos.get("avg_price") or 0)
+            # stop_loss_price=0은 코드 레벨 하드 스톱로스 체크에서 무시되므로(0 이하 skip),
+            # 백필된 포지션도 즉시 보호받도록 RiskConfig 최대 손절폭 기준 보수적 기본값을 채운다.
+            # LLM/사용자가 더 타이트한 값으로 갱신하기 전까지의 임시 안전망일 뿐이다.
+            default_stop = (
+                round(avg_price * (1 - RISK.max_stop_loss_pct / 100), 0) if avg_price > 0 else 0.0
+            )
+            self.open_trade(
+                ticker=ticker,
+                name=str(pos.get("name") or ticker),
+                entry_date=datetime.now().strftime("%Y-%m-%d"),
+                entry_price=avg_price,
+                quantity=quantity,
+                stop_loss_price=default_stop,
+                entry_reason="reconciled_from_broker_balance",
+                confidence=0,
+                order_no="RECONCILED",
+                strategy_type="UNKNOWN",
+            )
+            backfilled.append(ticker)
+        return backfilled
 
     def get_open_positions(self) -> list[dict]:
         with self._conn() as conn:

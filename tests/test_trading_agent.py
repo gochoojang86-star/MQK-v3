@@ -158,6 +158,67 @@ def test_run_blocks_tool_not_allowed_in_phase():
     assert "tool_not_allowed_in_phase" in llm.calls[1][1]
 
 
+def test_run_intraday_buy_requires_tool_before_final(monkeypatch):
+    def fake_get_watchlist_intraday_snapshot(ctx, phase, tickers):
+        return {
+            "snapshots": [
+                {
+                    "ticker": "005930",
+                    "price": 81000,
+                    "trading_value": 120000000000,
+                    "candle_count": 12,
+                    "recent_candles": [{"close": 81000, "volume": 1000}] * 10,
+                }
+            ]
+        }
+
+    monkeypatch.setitem(
+        TOOL_REGISTRY,
+        "get_watchlist_intraday_snapshot",
+        fake_get_watchlist_intraday_snapshot,
+    )
+
+    llm = FakeLLMClient([
+        {
+            "next_action": "final",
+            "action": "BUY",
+            "proposals": [
+                {"ticker": "005930", "side": "BUY", "confidence": 72, "stop_loss_price": 79000}
+            ],
+            "reason": "blind_buy",
+        },
+        {
+            "next_action": "call_tool",
+            "tool": "get_watchlist_intraday_snapshot",
+            "tool_args": {"tickers": ["005930"]},
+        },
+        {
+            "next_action": "final",
+            "action": "BUY",
+            "proposals": [
+                {"ticker": "005930", "side": "BUY", "confidence": 74, "stop_loss_price": 79000}
+            ],
+            "reason": "after_tool",
+        },
+    ])
+    agent = TradingAgent(mil=object(), llm=llm)
+    context = build_context(
+        phase=TradingPhase.INTRADAY, trading_date="2026-06-09",
+        regime={"status": "YELLOW"}, drift_status="STABLE",
+        risk_guidance={}, portfolio_snapshot={}, daily_pnl={}, risk_budget_remaining={},
+        watchlist=["005930"],
+    )
+
+    result = agent.run(TradingPhase.INTRADAY, context)
+
+    assert result["action"] == "BUY"
+    assert result["reason"] == "after_tool"
+    assert len(result["tool_history"]) == 1
+    assert result["tool_history"][0]["tool"] == "get_watchlist_intraday_snapshot"
+    assert len(llm.calls) == 3
+    assert "tool_call_required" in llm.calls[1][1]
+
+
 def test_run_handles_tool_failure(monkeypatch):
     def failing_get_flow(ctx, phase, ticker):
         raise ToolFailure("get_flow: circuit breaker open")
@@ -303,6 +364,16 @@ def test_regime_prompt_uses_korean_swing_philosophy_not_minervini():
     assert "전략 허용/금지 결정 금지" in text
 
 
+def test_regime_prompt_includes_v3_output_contract():
+    text = Path("prompts/agents/regime_agent.md").read_text(encoding="utf-8")
+    assert '"opportunity_mode"' in text
+    assert '"scanner_mode"' in text
+    assert '"risk_guidance"' in text
+    assert '"drift_triggers"' in text
+    assert '"cooldown_minutes"' in text
+    assert '"max_daily_triggers"' in text
+
+
 def test_close_prompt_mentions_gap_risk_and_time_exit():
     text = Path("prompts/agents/trading_agent/close.md").read_text(encoding="utf-8")
     assert "GAP_RISK_EXIT" in text
@@ -337,6 +408,14 @@ def test_scan_prompt_mentions_candidate_pool_as_primary_input():
     assert "모든 항목" in text  # 출발점→모든 항목 검토로 변경
     assert "_signal_count" in text  # signal_count 기반 정렬 안내 포함 확인
     assert "주입된 후보 facts는 이미 1차 검증 입력" in text
+
+
+def test_scan_prompt_does_not_hardcode_top8_news_prefetch():
+    text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
+    assert "상위 8개 종목" not in text
+    assert "상위 우선순위 구간 종목들" in text
+    assert "뉴스는 참고 자료다" in text
+    assert "등재 자체를 기계적으로 막는 용도가 아니다" in text
 
 
 def test_scan_prompt_mentions_llm_peer_comparison_within_theme_cluster():

@@ -184,3 +184,63 @@ def test_today_summary_with_closed_trade(tmp_path):
     assert summary["last_trade"]["ticker"] == "005930"
     assert summary["last_trade"]["result"] == "LOSS"
     assert summary["last_trade"]["pct"] < 0
+
+
+def test_reconcile_open_positions_backfills_untracked_broker_holding(journal):
+    """저널이 모르는 브로커 보유 종목은 open_trade로 백필돼야 한다.
+
+    2026-07-02 사고 원인: 브로커(모의계좌)엔 000660/005930이 실제로 잡혀 있었는데
+    저널엔 기록이 없어 CLOSE phase의 SELL도, 코드 레벨 하드 스톱로스도 이 종목들을
+    전혀 인식하지 못했다. reconcile은 이 드리프트를 스캔 때마다 메꾼다.
+    """
+    broker_positions = [
+        {"ticker": "000660", "name": "SK하이닉스", "quantity": 1, "avg_price": 2409000.0},
+    ]
+
+    backfilled = journal.reconcile_open_positions(broker_positions)
+
+    assert backfilled == ["000660"]
+    open_pos = journal.get_open_positions()
+    assert len(open_pos) == 1
+    assert open_pos[0]["ticker"] == "000660"
+    assert open_pos[0]["entry_price"] == 2409000.0
+    assert open_pos[0]["quantity"] == 1
+    assert open_pos[0]["entry_reason"] == "reconciled_from_broker_balance"
+    # 백필된 포지션도 코드 레벨 하드 스톱로스 보호를 즉시 받아야 한다 —
+    # stop_loss_price=0은 하드 스톱로스 체크에서 무시되므로 0이면 안 된다.
+    assert open_pos[0]["stop_loss_price"] == pytest.approx(2409000.0 * 0.9)
+
+
+def test_reconcile_open_positions_does_not_duplicate_tracked_position(journal):
+    journal.open_trade(
+        ticker="005930",
+        name="삼성전자",
+        entry_date=_TODAY,
+        entry_price=298000,
+        quantity=1,
+        stop_loss_price=280000,
+        entry_reason="VOLUME_SURGE_LEADER",
+        confidence=80,
+    )
+    broker_positions = [
+        {"ticker": "005930", "name": "삼성전자", "quantity": 1, "avg_price": 298000.0},
+    ]
+
+    backfilled = journal.reconcile_open_positions(broker_positions)
+
+    assert backfilled == []
+    open_pos = journal.get_open_positions()
+    assert len(open_pos) == 1
+    assert open_pos[0]["entry_reason"] == "VOLUME_SURGE_LEADER"
+
+
+def test_reconcile_open_positions_skips_zero_or_invalid_quantity(journal):
+    broker_positions = [
+        {"ticker": "000660", "name": "SK하이닉스", "quantity": 0, "avg_price": 2409000.0},
+        {"ticker": "", "name": "빈종목코드", "quantity": 1, "avg_price": 1000.0},
+    ]
+
+    backfilled = journal.reconcile_open_positions(broker_positions)
+
+    assert backfilled == []
+    assert journal.get_open_positions() == []

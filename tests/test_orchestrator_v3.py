@@ -825,6 +825,104 @@ def test_build_scan_candidate_pool_keeps_minority_themes_when_one_theme_outnumbe
     assert "방산" in theme_hints
 
 
+def test_build_scan_candidate_pool_prioritizes_reversal_leaders_in_risk_off(monkeypatch, tmp_path):
+    import market_intelligence.theme as mil_theme
+    import market_intelligence.screening as mil_screening
+
+    monkeypatch.setattr(
+        mil_screening,
+        "get_top_movers",
+        lambda ctx, phase: {
+            "trading_value_stock_top": [
+                {"ticker": "000660", "name": "SK하이닉스", "change_pct": -8.5, "trading_value_krw": 12_000_000_000_000},
+                {"ticker": "161890", "name": "한국콜마", "change_pct": 5.2, "trading_value_krw": 900_000_000_000},
+                {"ticker": "123456", "name": "테마후발주", "change_pct": 14.0, "trading_value_krw": 80_000_000_000},
+            ],
+            "change_rate_top": [
+                {"ticker": "123456", "name": "테마후발주", "change_pct": 14.0},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        mil_screening,
+        "get_attention_rank",
+        lambda ctx, phase: {"kiwoom_viewing_rank": [{"ticker": "123456", "name": "테마후발주", "rank": 1}], "kis_hts_top": []},
+    )
+    monkeypatch.setattr(
+        mil_screening,
+        "get_program_netbuy_rank",
+        lambda ctx, phase: {"stocks": [{"ticker": "161890", "name": "한국콜마", "change_pct": 5.2}]},
+    )
+    monkeypatch.setattr(
+        mil_screening,
+        "get_foreign_institution_rank",
+        lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": [{"ticker": "161890", "name": "한국콜마"}]},
+    )
+    monkeypatch.setattr(mil_screening, "get_foreign_continuous_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_volume_surge", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(
+        mil_theme,
+        "get_theme_candidates",
+        lambda ctx, phase: {
+            "candidates": [
+                {"ticker": "000660", "name": "SK하이닉스", "theme_name": "반도체"},
+                {"ticker": "161890", "name": "한국콜마", "theme_name": "화장품"},
+                {"ticker": "123456", "name": "테마후발주", "theme_name": "잡테마"},
+            ]
+        },
+    )
+
+    orch = make_orchestrator(tmp_path)
+    pool = orch._build_scan_candidate_pool(regime={"status": "RED", "regime": "RISK_OFF"})
+
+    top_tickers = [item["ticker"] for item in pool[:2]]
+    assert "000660" in top_tickers
+    assert "161890" in top_tickers
+
+
+def test_build_scan_candidate_pool_keeps_default_order_when_not_risk_off(monkeypatch, tmp_path):
+    import market_intelligence.theme as mil_theme
+    import market_intelligence.screening as mil_screening
+
+    monkeypatch.setattr(
+        mil_screening,
+        "get_top_movers",
+        lambda ctx, phase: {
+            "trading_value_stock_top": [
+                {"ticker": "000660", "name": "SK하이닉스", "change_pct": -8.5, "trading_value_krw": 12_000_000_000_000},
+                {"ticker": "123456", "name": "테마후발주", "change_pct": 14.0, "trading_value_krw": 80_000_000_000},
+            ],
+            "change_rate_top": [
+                {"ticker": "123456", "name": "테마후발주", "change_pct": 14.0},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        mil_screening,
+        "get_attention_rank",
+        lambda ctx, phase: {"kiwoom_viewing_rank": [{"ticker": "123456", "name": "테마후발주", "rank": 1}], "kis_hts_top": []},
+    )
+    monkeypatch.setattr(mil_screening, "get_program_netbuy_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_institution_rank", lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_continuous_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_volume_surge", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(
+        mil_theme,
+        "get_theme_candidates",
+        lambda ctx, phase: {
+            "candidates": [
+                {"ticker": "000660", "name": "SK하이닉스", "theme_name": "반도체"},
+                {"ticker": "123456", "name": "테마후발주", "theme_name": "잡테마"},
+            ]
+        },
+    )
+
+    orch = make_orchestrator(tmp_path)
+    pool = orch._build_scan_candidate_pool(regime={"status": "YELLOW", "regime": "SIDEWAYS"})
+
+    assert pool[0]["ticker"] == "123456"
+
+
 def test_run_scan_v3_keeps_monitoring_watchlist_when_positions_full(monkeypatch, tmp_path):
     import market_intelligence.portfolio as mil_portfolio
     import market_intelligence.screening as mil_screening
@@ -1184,6 +1282,52 @@ def test_run_intraday_v3_stable_executes_no_trade(monkeypatch, tmp_path):
     assert saved_drift["today_caution_count"] == 0
 
 
+def test_run_intraday_v3_disables_leader_reentry_floor_during_risk_off_regime(monkeypatch, tmp_path):
+    """2026-07-02 사고: RED/RISK_OFF 장에서도 leader_reentry_confidence_floor(70)가 살아있어
+    본류 대장주 재진입 눌림이라는 이유로 confidence 71짜리 REVERSAL 매수(000660)가
+    정상 문턱(75) 없이 통과됐다. RISK_OFF에서는 이 예외 자체를 꺼서, 폭락장에서는
+    일반 문턱을 그대로 적용하도록 한다."""
+    import market_intelligence.portfolio as mil_portfolio
+    import market_intelligence.market as mil_market
+
+    monkeypatch.setattr(mil_portfolio, "get_open_positions",
+                         lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl",
+                         lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 10_000_000})
+    monkeypatch.setattr(mil_market, "get_market_context",
+                         lambda ctx, phase: {"kospi_change_pct": -7.0, "kosdaq_change_pct": -6.0, "foreign_net_buy_krw": 0})
+    monkeypatch.setattr(mil_market, "get_intraday_index_candles",
+                         lambda ctx, phase: {"candles": []})
+    monkeypatch.setattr(mil_market, "get_sector_breadth",
+                         lambda ctx, phase: {"market_breadth": {}})
+
+    orch = make_orchestrator(tmp_path)
+    orch._drift_detector = FakeDriftDetector({
+        "drift_judgment": "STABLE", "reason": "no_trigger_fired", "metrics": {}, "triggered": [],
+        "new_status": None, "risk_guidance_delta": {},
+        "drift_state": {"date": "2026-06-09", "last_trigger_time": {}, "today_caution_count": 0, "daily_lite_llm_calls": 0},
+    })
+    orch._trading_agent = FakeTradingAgent({"action": "NO_TRADE", "proposals": [], "reason": "폭락장 관망"})
+
+    regime = {
+        "status": "RED", "regime": "RISK_OFF", "confidence": 90,
+        "risk_guidance": {"max_positions": 4, "buy_confidence_threshold": 75,
+                           "risk_per_trade_pct": 0.35, "min_trading_value_krw": 1_000_000_000},
+        "drift_triggers": [], "cooldown_minutes": 60, "max_daily_triggers": 3,
+        "timestamp": "2026-06-09T08:45:00",
+    }
+    (tmp_path / "last_regime.json").write_text(json.dumps(regime), encoding="utf-8")
+    (tmp_path / "watchlist.json").write_text(json.dumps({"watchlist": ["005930"]}), encoding="utf-8")
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    orch.run_intraday_v3()
+
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] is None
+
+
 def test_run_intraday_v3_merges_watchlist_additions(monkeypatch, tmp_path):
     import market_intelligence.portfolio as mil_portfolio
     import market_intelligence.market as mil_market
@@ -1257,8 +1401,56 @@ def test_sanitize_intraday_result_clears_proposals_for_hold_and_no_trade(tmp_pat
 
     assert hold_result["action"] == "HOLD"
     assert hold_result["proposals"] == []
+    assert hold_result["standardized_reason_code"] == "HOLD_MISC"
     assert no_trade_result["action"] == "NO_TRADE"
     assert no_trade_result["proposals"] == []
+    assert no_trade_result["standardized_reason_code"] == "HOLD_MISC"
+
+
+def test_sanitize_intraday_result_adds_standardized_reason_codes(tmp_path):
+    orch = make_orchestrator(tmp_path)
+
+    result = orch._sanitize_intraday_result(
+        {
+            "action": "BUY",
+            "reason": "본류 대장주 반등 확인",
+            "proposals": [
+                {
+                    "ticker": "000660",
+                    "side": "BUY",
+                    "setup": "REVERSAL",
+                    "stop_loss_price": 210000,
+                    "reason": "panic rebound",
+                },
+                {
+                    "ticker": "005930",
+                    "side": "SELL",
+                    "sell_type": "PRICE_SIGNAL",
+                    "reason": "day low breakdown",
+                },
+            ],
+        }
+    )
+
+    assert result["standardized_reason_code"] == "BUY_SIGNAL_CONFIRMED"
+    assert result["standardized_proposal_reason_codes"] == ["REVERSAL_ENTRY", "PRICE_SIGNAL"]
+    assert result["proposals"][0]["standardized_reason_code"] == "REVERSAL_ENTRY"
+    assert result["proposals"][1]["standardized_reason_code"] == "PRICE_SIGNAL"
+
+
+def test_sanitize_intraday_result_preserves_explicit_standardized_reason_codes(tmp_path):
+    orch = make_orchestrator(tmp_path)
+
+    result = orch._sanitize_intraday_result(
+        {
+            "action": "NO_TRADE",
+            "reason": "stale_regime",
+            "standardized_reason_code": "STALE_REGIME",
+            "proposals": [],
+        }
+    )
+
+    assert result["standardized_reason_code"] == "STALE_REGIME"
 
 
 def test_run_intraday_v3_skips_on_stale_regime(monkeypatch, tmp_path):
@@ -1804,10 +1996,10 @@ def test_handle_proposals_skips_malformed_and_executes_valid(tmp_path, monkeypat
 
     assert results[0]["action"] == "SKIP"
     assert results[0]["reason"] == "malformed_proposal"
-    assert results[1]["action"] == "SKIP"
-    assert results[1]["reason"] == "malformed_proposal"
+    assert results[1]["action"] == "BUY_EXECUTED"
     assert results[2]["action"] == "BUY_EXECUTED"
-    assert orch._order_manager.buy_calls[0].ticker == "005930"
+    assert orch._order_manager.buy_calls[0].ticker == "000660"
+    assert orch._order_manager.buy_calls[1].ticker == "005930"
 
 
 def test_handle_sell_proposals_skips_malformed(tmp_path, monkeypatch):
@@ -2137,3 +2329,144 @@ def test_v3_orchestrator_source_does_not_contain_v4_premarket_sejuk_log_label():
 
     assert "[v4 PREMARKET_SEJUK]" not in text
     assert "[v3 PREMARKET_SEJUK]" in text
+
+
+# ── 저널-브로커 포지션 동기화 (2026-07-02 사고 재발 방지) ──────────────────────
+
+class _FakeTelegram:
+    def __init__(self):
+        self.messages = []
+
+    def notify(self, text):
+        self.messages.append(text)
+
+
+def test_reconcile_journal_with_broker_backfills_from_portfolio_state(tmp_path):
+    from codes.risk_officer import PortfolioState
+    from codes.trade_journal import TradeJournal
+
+    orch = make_orchestrator(tmp_path)
+    orch._journal = TradeJournal(db_path=tmp_path / "trades.db")
+    orch._telegram = _FakeTelegram()
+    orch.build_portfolio_state = lambda: PortfolioState(
+        total_capital=10_000_000,
+        daily_pnl=0.0,
+        open_positions=[
+            {"ticker": "000660", "name": "SK하이닉스", "quantity": 1, "avg_price": 2409000.0},
+        ],
+        theme_exposure={},
+    )
+
+    backfilled = orch._reconcile_journal_with_broker()
+
+    assert backfilled == ["000660"]
+    assert [p["ticker"] for p in orch._journal.get_open_positions()] == ["000660"]
+    assert any("000660" in m for m in orch._telegram.messages)
+
+
+def test_reconcile_journal_with_broker_is_fail_open_on_balance_error(tmp_path):
+    from codes.trade_journal import TradeJournal
+
+    orch = make_orchestrator(tmp_path)
+    orch._journal = TradeJournal(db_path=tmp_path / "trades.db")
+    orch._telegram = _FakeTelegram()
+
+    def _raise():
+        raise RuntimeError("KIS balance query failed")
+
+    orch.build_portfolio_state = _raise
+
+    backfilled = orch._reconcile_journal_with_broker()
+
+    assert backfilled == []
+    assert orch._journal.get_open_positions() == []
+
+
+def test_reconcile_journal_with_broker_skips_already_tracked_position(tmp_path):
+    from codes.risk_officer import PortfolioState
+    from codes.trade_journal import TradeJournal
+
+    orch = make_orchestrator(tmp_path)
+    orch._journal = TradeJournal(db_path=tmp_path / "trades.db")
+    orch._journal.open_trade(
+        ticker="005930", name="삼성전자", entry_date="2026-07-02",
+        entry_price=298000, quantity=1, stop_loss_price=280000,
+        entry_reason="VOLUME_SURGE_LEADER", confidence=80,
+    )
+    orch._telegram = _FakeTelegram()
+    orch.build_portfolio_state = lambda: PortfolioState(
+        total_capital=10_000_000, daily_pnl=0.0,
+        open_positions=[{"ticker": "005930", "name": "삼성전자", "quantity": 1, "avg_price": 298000.0}],
+        theme_exposure={},
+    )
+
+    backfilled = orch._reconcile_journal_with_broker()
+
+    assert backfilled == []
+    assert orch._telegram.messages == []
+
+
+def test_check_hard_stop_loss_reconciles_before_reading_journal(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    calls = []
+    orch._reconcile_journal_with_broker = lambda: calls.append("reconcile")
+
+    class _FakeJournal:
+        def get_open_positions(self):
+            calls.append("get_open_positions")
+            return []
+
+    orch._journal = _FakeJournal()
+
+    orch._check_hard_stop_loss()
+
+    assert calls == ["reconcile", "get_open_positions"]
+
+
+def test_run_close_v3_reconciles_before_building_context(tmp_path, monkeypatch):
+    orch = make_orchestrator(tmp_path)
+    calls = []
+    orch._reconcile_journal_with_broker = lambda: calls.append("reconcile")
+
+    def _build_context(*args, **kwargs):
+        calls.append("build_context")
+        return {}
+
+    orch._build_context = _build_context
+    orch._trading_agent = type("_TA", (), {"run": lambda self, phase, ctx: {"sell_proposals": []}})()
+    orch._record_tool_request = lambda *a, **k: None
+    orch._alert_on_tool_failures = lambda *a, **k: None
+    orch._handle_sell_proposals = lambda *a, **k: []
+    orch._save_json = lambda *a, **k: None
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+
+    orch.run_close_v3()
+
+    assert calls == ["reconcile", "build_context"]
+
+
+def test_run_premarket_early_v3_reconciles_first(tmp_path, monkeypatch):
+    import market_intelligence.screening as mil_screening
+
+    orch = make_orchestrator(tmp_path)
+    calls = []
+    orch._reconcile_journal_with_broker = lambda: calls.append("reconcile")
+    orch._trading_agent = type("_TA", (), {"run": lambda self, phase, ctx: {
+        "next_action": "final", "action": "WATCHLIST_UPDATE", "watchlist": [], "candidates": [], "reason": "",
+    }})()
+    orch._record_tool_request = lambda *a, **k: None
+    orch._alert_on_tool_failures = lambda *a, **k: None
+    orch._save_json = lambda *a, **k: None
+    orch._build_context = lambda *a, **k: {}
+
+    monkeypatch.setattr(mil_screening, "get_limit_up_stocks", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_premarket_movers", lambda ctx, phase: {"movers": []})
+    monkeypatch.setattr(mil_screening, "get_overtime_rank", lambda ctx, phase: {"kospi": [], "kosdaq": [], "total": 0})
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    orch.run_premarket_early_v3()
+
+    assert calls == ["reconcile"]

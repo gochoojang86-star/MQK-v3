@@ -57,6 +57,40 @@ _TOOL_GAP_LOG_RETENTION_DAYS = 30
 _MIN_MONITORING_WATCHLIST = 6
 _MAX_WATCHLIST_SIZE = 10
 _REVERSAL_SETUP_ALIASES = {"REVERSAL_BOTTOM", "SETUP4_PANIC"}
+_INTRADAY_TOPLEVEL_REASON_CODES = {
+    "NO_REGIME",
+    "STALE_REGIME",
+    "IDLE_SKIP",
+    "GATE_DATA_UNAVAILABLE",
+    "NO_CRASH_GATE",
+    "INVALID_INTRADAY_RESULT",
+    "TOOL_FAILURES_EXCEEDED",
+    "MAX_STEPS_EXCEEDED",
+    "DATA_UNAVAILABLE",
+    "ENTRY_SETUP_UNCONFIRMED",
+    "POSITION_MANAGEMENT_PRIORITY",
+    "MARKET_NOT_SUPPORTIVE",
+    "LATE_CHASE_RISK",
+    "HOLD_MISC",
+    "BUY_SIGNAL_CONFIRMED",
+    "SELL_SIGNAL_CONFIRMED",
+}
+_INTRADAY_PROPOSAL_REASON_CODES = {
+    "REVERSAL_ENTRY",
+    "THEME_CATALYST_ENTRY",
+    "VOLUME_SURGE_ENTRY",
+    "LIMIT_UP_PULLBACK_ENTRY",
+    "RELATIVE_STRENGTH_ENTRY",
+    "TREND_ENTRY",
+    "BUY_CANDIDATE",
+    "SELL_CANDIDATE",
+    "VOLUME_DRY",
+    "FLOW_REVERSAL",
+    "THEME_FADE",
+    "PRICE_SIGNAL",
+    "LIMIT_UP_FAIL",
+    "REVERSAL_PROFIT",
+}
 
 
 def _default_drift_state(date: str) -> dict:
@@ -81,6 +115,104 @@ def _to_float(value) -> float:
         return float(str(value).replace(",", ""))
     except (ValueError, TypeError):
         return 0.0
+
+
+def _normalize_reason_code(value: str | None) -> str:
+    raw = str(value or "").strip().upper()
+    if re.fullmatch(r"[A-Z0-9_]+", raw):
+        return raw
+    return ""
+
+
+def _infer_intraday_top_level_reason_code(action: str, reason: str) -> str:
+    normalized_reason = str(reason or "").strip().lower()
+    normalized_action = str(action or "").upper()
+
+    exact_reason_map = {
+        "no_regime": "NO_REGIME",
+        "stale_regime": "STALE_REGIME",
+        "idle_skip": "IDLE_SKIP",
+        "gate_data_unavailable": "GATE_DATA_UNAVAILABLE",
+        "no_crash_gate": "NO_CRASH_GATE",
+        "invalid_intraday_result": "INVALID_INTRADAY_RESULT",
+        "tool_failures_exceeded": "TOOL_FAILURES_EXCEEDED",
+        "max_steps_exceeded": "MAX_STEPS_EXCEEDED",
+    }
+    if normalized_reason in exact_reason_map:
+        return exact_reason_map[normalized_reason]
+
+    if normalized_action == "BUY":
+        return "BUY_SIGNAL_CONFIRMED"
+    if normalized_action == "SELL":
+        return "SELL_SIGNAL_CONFIRMED"
+    if "도구로 확보하지 못" in normalized_reason or "데이터" in normalized_reason and (
+        "없" in normalized_reason or "부족" in normalized_reason or "못" in normalized_reason
+    ):
+        return "DATA_UNAVAILABLE"
+    if "추격" in normalized_reason:
+        return "LATE_CHASE_RISK"
+    if "보유" in normalized_reason or "청산" in normalized_reason:
+        return "POSITION_MANAGEMENT_PRIORITY"
+    if "시장" in normalized_reason and ("혼조" in normalized_reason or "risk_off" in normalized_reason):
+        return "MARKET_NOT_SUPPORTIVE"
+    if "분봉" in normalized_reason or "눌림" in normalized_reason or "돌파" in normalized_reason:
+        return "ENTRY_SETUP_UNCONFIRMED"
+    if normalized_action == "HOLD":
+        return "HOLD_MISC"
+    if normalized_action == "NO_TRADE":
+        return "DATA_UNAVAILABLE" if "확인" in normalized_reason else "HOLD_MISC"
+    return "HOLD_MISC"
+
+
+def _infer_intraday_proposal_reason_code(proposal: dict) -> str:
+    side = str(proposal.get("side") or "").upper()
+    if side == "SELL":
+        sell_type = _normalize_reason_code(proposal.get("sell_type"))
+        if sell_type in _INTRADAY_PROPOSAL_REASON_CODES:
+            return sell_type
+        return "SELL_CANDIDATE"
+
+    setup = _normalize_setup_name(proposal.get("setup"))
+    setup_map = {
+        "REVERSAL": "REVERSAL_ENTRY",
+        "THEME_CATALYST": "THEME_CATALYST_ENTRY",
+        "VOLUME_SURGE_LEADER": "VOLUME_SURGE_ENTRY",
+        "LIMIT_UP_PULLBACK": "LIMIT_UP_PULLBACK_ENTRY",
+        "RELATIVE_STRENGTH": "RELATIVE_STRENGTH_ENTRY",
+        "TREND": "TREND_ENTRY",
+    }
+    return setup_map.get(setup, "BUY_CANDIDATE")
+
+
+def _is_risk_off_regime(regime: dict | None) -> bool:
+    if not isinstance(regime, dict):
+        return False
+    status = str(regime.get("status") or "").upper()
+    regime_name = str(regime.get("regime") or "").upper()
+    return status == "RED" or regime_name == "RISK_OFF"
+
+
+def _risk_off_leader_priority_tuple(item: dict) -> tuple[int, int, int]:
+    facts = item.get("facts") or {}
+    tv_rank = facts.get("trading_value_rank")
+    change_pct = _to_float(facts.get("change_pct"))
+    has_flow = int(
+        bool(facts.get("program_netbuy_rank"))
+        or bool(facts.get("foreign_netbuy"))
+        or bool(facts.get("institution_netbuy"))
+    )
+    is_top_liquidity = int(isinstance(tv_rank, int) and tv_rank <= 12)
+    is_reversal = int(is_top_liquidity and change_pct <= -5.0)
+    is_defensive_or_supported = int(
+        is_top_liquidity
+        and (
+            change_pct >= 0.0
+            or has_flow
+            or bool(facts.get("volume_surge"))
+            or (isinstance(facts.get("attention_rank"), int) and facts.get("attention_rank") <= 10)
+        )
+    )
+    return (max(is_reversal, is_defensive_or_supported), is_reversal, has_flow)
 
 
 def _diversify_by_theme(
@@ -380,6 +512,7 @@ class MQKOrchestratorV3:
         오늘 진입 후보를 watchlist에 선주입한다. 세력 이탈 종목은 제거.
         레짐 판단은 09:03 run_premarket_v3()가 담당.
         """
+        self._reconcile_journal_with_broker()
         regime = load_last_regime(path=_LAST_REGIME_PATH) or {}
         regime_dict = _regime_to_dict(regime) if hasattr(regime, 'status') else regime
 
@@ -462,7 +595,7 @@ class MQKOrchestratorV3:
             watchlist=existing_watchlist,
         )
         context["next_day_prior"] = load_next_day_premarket_context(path=_NEXT_DAY_PREMARKET_CONTEXT_PATH)
-        context["candidate_pool"] = self._build_scan_candidate_pool()
+        context["candidate_pool"] = self._build_scan_candidate_pool(regime=regime)
         context["market_story_brief"] = self._build_scan_market_story_brief()
 
         # 거래대금 폭증 종목 사전 탐지 (코드가 수집 → LLM이 검증)
@@ -490,7 +623,7 @@ class MQKOrchestratorV3:
 
         context["volume_surge_candidates"] = surge_candidates
 
-        # 종목 뉴스 사전 주입 — pool 상위 8개 종목의 뉴스를 코드가 수집해 facts에 embed.
+        # 종목 뉴스 사전 주입 — pool 상위 우선순위 구간 종목의 뉴스를 코드가 수집해 facts에 embed.
         # LLM이 get_news_stock을 건너뛰더라도 촉매 판단 근거가 context에 이미 존재한다.
         self._prefetch_pool_news(context["candidate_pool"])
 
@@ -614,6 +747,10 @@ class MQKOrchestratorV3:
                 logger.info("[INTRADAY] watchlist 0 + 보유 0 + STABLE + 정상장 — LLM 미호출 스킵")
                 return {"action": "NO_TRADE", "reason": "idle_skip"}
 
+        # LLM 호출 전 코드 레벨 하드 스톱로스 체크
+        # LLM이 다른 종목에 집중하는 사이 보유 종목 스톱이 뚫리는 것을 방지
+        self._check_hard_stop_loss()
+
         context = self._build_context(
             TradingPhase.INTRADAY, regime, drift_judgment,
             watchlist=watchlist,
@@ -690,6 +827,7 @@ class MQKOrchestratorV3:
         거래 복기는 마감 확정 데이터로 market_close(17:00)가 수행한다.
         실전 전환 후 늦은 청산이 필요하면 after_hours=True 경로(06)를 쓸 수 있다.
         """
+        self._reconcile_journal_with_broker()
         regime = load_last_regime(path=_LAST_REGIME_PATH) or {}
         drift_state = load_drift_state(path=_DRIFT_STATE_PATH, today=self._today)
         context = self._build_context(TradingPhase.CLOSE, regime, _drift_status(drift_state), watchlist=[])
@@ -1097,7 +1235,7 @@ class MQKOrchestratorV3:
             brief["data_quality"] = {"missing_fields": missing}
         return brief
 
-    def _build_scan_candidate_pool(self) -> list[dict]:
+    def _build_scan_candidate_pool(self, regime: dict | None = None) -> list[dict]:
         """LLM이 바로 비교할 수 있는 압축된 후보 풀만 만든다.
 
         원본 API 응답 전체를 넣지 않고, 의미 있는 종목에 대한 핵심 fact만 남긴다.
@@ -1249,10 +1387,15 @@ class MQKOrchestratorV3:
             item["why_in_pool"] = sorted(set(item["why_in_pool"]))
         # signal_count: 복수 출처에 등장할수록 진짜 시장 주목 종목.
         # TV rank는 대형주 편향이 강하므로 tiebreaker로만 사용.
+        risk_off_mode = _is_risk_off_regime(regime)
         for item in candidates:
             item["_signal_count"] = len(item["why_in_pool"])
+            item["_risk_off_leader_priority"] = _risk_off_leader_priority_tuple(item)
         candidates.sort(
             key=lambda item: (
+                item["_risk_off_leader_priority"][0] if risk_off_mode else 0,
+                item["_risk_off_leader_priority"][1] if risk_off_mode else 0,
+                item["_risk_off_leader_priority"][2] if risk_off_mode else 0,
                 item["_signal_count"],
                 0 if item["facts"]["trading_value_rank"] is None else 1,
                 -(item["facts"]["trading_value_rank"] or 999),
@@ -1273,13 +1416,17 @@ class MQKOrchestratorV3:
         )
         return diversified
 
-    def _prefetch_pool_news(self, pool: list[dict], top_n: int = 8) -> None:
-        """pool 상위 top_n 종목의 뉴스를 사전 수집해 facts["news"]에 embed한다.
+    def _prefetch_pool_news(self, pool: list[dict], top_n: int | None = None) -> None:
+        """pool 상위 우선순위 구간 종목의 뉴스를 사전 수집해 facts["news"]에 embed한다.
 
         LLM이 get_news_stock을 건너뛰더라도 촉매 판단 데이터가 context에 존재하도록 보장.
         뉴스 수집 실패 시 해당 종목만 스킵 (전체 SCAN 중단 없음).
         """
         phase = TradingPhase.SCAN.value
+        if top_n is None:
+            # 후보 풀이 넓어진 뒤에도 상위 8개만 고정 주입하면 정보 밀도가 급격히 떨어진다.
+            # 기본은 상위 12개, 단 pool이 더 작으면 pool 크기까지만 주입한다.
+            top_n = min(len(pool), 12)
         for item in pool[:top_n]:
             ticker = item.get("ticker", "")
             if not ticker:
@@ -1436,9 +1583,17 @@ class MQKOrchestratorV3:
                     "require_strong_evidence": True,
                     "discovery_priority": "watchlist_first_then_new_leaders",
                     "volume_trend_use_averages": True,
-                    "leader_reentry_confidence_floor": max(
-                        REGIME_SAFETY_BOUNDS.min_buy_confidence_threshold,
-                        float(risk_guidance.get("buy_confidence_threshold", 75.0)) - 5.0,
+                    # 2026-07-02 사고: RED/RISK_OFF 장에서도 이 예외가 살아있어 confidence
+                    # 71짜리 REVERSAL 재진입(000660)이 정상 문턱(75) 없이 통과됐다. 이
+                    # 예외는 "정상 시장에서 강한 대장주 눌림"을 위한 것이지 폭락장 반등
+                    # 기대 매수를 위한 것이 아니므로, RISK_OFF에서는 아예 끈다.
+                    "leader_reentry_confidence_floor": (
+                        None
+                        if _is_risk_off_regime(regime)
+                        else max(
+                            REGIME_SAFETY_BOUNDS.min_buy_confidence_threshold,
+                            float(risk_guidance.get("buy_confidence_threshold", 75.0)) - 5.0,
+                        )
                     ),
                 }
                 if phase == TradingPhase.INTRADAY
@@ -1471,9 +1626,15 @@ class MQKOrchestratorV3:
 
     def _sanitize_intraday_result(self, result: dict) -> dict:
         if not isinstance(result, dict):
-            return {"action": "NO_TRADE", "reason": "invalid_intraday_result", "proposals": []}
+            return {
+                "action": "NO_TRADE",
+                "reason": "invalid_intraday_result",
+                "standardized_reason_code": "INVALID_INTRADAY_RESULT",
+                "proposals": [],
+            }
 
         action = str(result.get("action") or "NO_TRADE").upper()
+        top_level_reason_code = _normalize_reason_code(result.get("standardized_reason_code"))
         raw_proposals = result.get("proposals") or []
         if not isinstance(raw_proposals, list):
             raw_proposals = []
@@ -1485,13 +1646,19 @@ class MQKOrchestratorV3:
             side = str(proposal.get("side") or "").upper()
             if side not in {"BUY", "SELL"}:
                 continue
-            valid_proposals.append(proposal)
+            proposal_reason_code = _normalize_reason_code(proposal.get("standardized_reason_code"))
+            if proposal_reason_code not in _INTRADAY_PROPOSAL_REASON_CODES:
+                proposal_reason_code = _infer_intraday_proposal_reason_code(proposal)
+            valid_proposals.append({**proposal, "standardized_reason_code": proposal_reason_code})
 
         if action in {"HOLD", "NO_TRADE"} and valid_proposals:
             logger.warning(
                 f"[V3 INTRADAY] action={action}인데 실행 proposal {len(valid_proposals)}건 포함 — 안전상 제거"
             )
-            result = {**result, "proposals": []}
+            reason_code = top_level_reason_code or _infer_intraday_top_level_reason_code(
+                action, result.get("reason", "")
+            )
+            result = {**result, "proposals": [], "standardized_reason_code": reason_code}
             return result
 
         if action == "SELL":
@@ -1499,8 +1666,18 @@ class MQKOrchestratorV3:
         elif action == "BUY":
             valid_proposals = [p for p in valid_proposals if str(p.get("side") or "").upper() in {"BUY", "SELL"}]
 
-        if valid_proposals != raw_proposals:
-            result = {**result, "proposals": valid_proposals}
+        if top_level_reason_code not in _INTRADAY_TOPLEVEL_REASON_CODES:
+            top_level_reason_code = _infer_intraday_top_level_reason_code(action, result.get("reason", ""))
+
+        result = {
+            **result,
+            "proposals": valid_proposals,
+            "standardized_reason_code": top_level_reason_code,
+        }
+        if valid_proposals:
+            result["standardized_proposal_reason_codes"] = [
+                proposal["standardized_reason_code"] for proposal in valid_proposals
+            ]
         return result
 
     def _watchlist_entries_from_scan_result(self, result: dict) -> list[dict]:
@@ -1718,6 +1895,92 @@ class MQKOrchestratorV3:
         except Exception as e:
             logger.warning(f"[도구 실패 알림] 텔레그램 발송 실패: {e}")
 
+    # ── 저널-브로커 포지션 동기화 (2026-07-02 사고 재발 방지) ──────────────────
+
+    def _reconcile_journal_with_broker(self) -> list[str]:
+        """저널이 놓친 브로커 보유 종목을 백필한다.
+
+        2026-07-02: 브로커(모의계좌)엔 000660/005930이 실제로 잡혀 있었는데 로컬
+        저널(TradeJournal)엔 진입 기록이 없어 CLOSE phase의 SELL 처리와 코드 레벨
+        하드 스톱로스가 모두 두 종목을 인식하지 못했다 — 둘 다 저널을 유일한
+        진실의 원천으로 쓴다. 매수가 저널 기록 없이 체결되는 경로(수동 매수 등)가
+        남아있는 한 드리프트는 재발할 수 있으므로, 위험한 코드 경로(하드 스톱로스,
+        CLOSE 청산) 진입 직전에 항상 먼저 호출해 브로커 잔고 기준으로 메꾼다.
+
+        브로커 조회 실패는 fail-open(저널 상태 그대로 유지, 다음 호출에 재시도)—
+        조회 실패로 phase 전체가 죽으면 안 된다.
+        """
+        journal = getattr(self, "_journal", None)
+        if journal is None:
+            return []
+        try:
+            portfolio_state = self.build_portfolio_state()
+        except Exception as e:
+            logger.warning(f"[RECONCILE] 브로커 잔고 조회 실패 — 저널 동기화 스킵: {e}")
+            return []
+        try:
+            backfilled = journal.reconcile_open_positions(portfolio_state.open_positions)
+        except Exception as e:
+            logger.error(f"[RECONCILE] 저널 백필 실패: {e}")
+            return []
+        if backfilled:
+            logger.warning(f"[RECONCILE] 저널에 없던 브로커 보유 종목 백필: {backfilled}")
+            try:
+                self._telegram.notify(
+                    "⚠️ *저널-브로커 포지션 동기화*\n"
+                    f"저널에 없던 보유 종목을 백필했습니다: {', '.join(backfilled)}\n"
+                    "stop_loss_price는 임시 안전망(진입가 대비 최대손절폭)이니 직접 확인하세요."
+                )
+            except Exception as e:
+                logger.warning(f"[RECONCILE 알림] 텔레그램 발송 실패: {e}")
+        return backfilled
+
+    # ── Hard Stop Loss (LLM 호출 전 코드 레벨 강제 손절) ──────────────────────
+
+    def _check_hard_stop_loss(self) -> list[dict]:
+        """보유 종목의 현재가가 stop_loss_price 이하면 LLM 없이 즉시 청산.
+
+        LLM이 다른 종목에 집중하느라 보유 종목을 안 보는 사이 스톱이 뚫리는
+        상황을 방지한다. 10분 틱마다 intraday 시작 전에 항상 실행된다.
+        """
+        results = []
+        journal = getattr(self, "_journal", None)
+        if journal is None:
+            return results
+        self._reconcile_journal_with_broker()
+        try:
+            open_positions = journal.get_open_positions()
+        except Exception as e:
+            logger.warning(f"[HARD_STOP] 저널 조회 실패 — 스킵: {e}")
+            return results
+
+        for pos in open_positions:
+            ticker = pos.get("ticker")
+            stop_loss = float(pos.get("stop_loss_price") or 0)
+            if not ticker or stop_loss <= 0:
+                continue
+            try:
+                snapshot = self._market_data.get_snapshot(ticker)
+                current_price = snapshot.current_price
+            except Exception as e:
+                logger.warning(f"[HARD_STOP] {ticker} 현재가 조회 실패: {e}")
+                continue
+
+            if current_price <= stop_loss:
+                logger.warning(
+                    f"[HARD_STOP] {ticker} 현재가 {current_price:,.0f} ≤ 스톱 {stop_loss:,.0f} — 즉시 청산"
+                )
+                proposal = {
+                    "ticker": ticker,
+                    "side": "SELL",
+                    "sell_type": "PRICE_SIGNAL",
+                    "reason": f"[HARD_STOP] 현재가 {current_price:,.0f}원이 스톱로스 {stop_loss:,.0f}원 이하 — 코드 레벨 강제 청산",
+                    "confidence": 100,
+                }
+                result = self._process_v3_sell_proposal(proposal, require_approval=False)
+                results.append(result)
+        return results
+
     # ── proposal → Safety Layer ─────────────────────────────────────────────
 
     def _handle_proposals(self, proposals: list[dict]) -> list[dict]:
@@ -1791,12 +2054,29 @@ class MQKOrchestratorV3:
             return str(theme)
         return theme_by_ticker.get(str(proposal.get("ticker") or ""), "UNKNOWN")
 
+    _DEFAULT_STOP_PCT_BY_SETUP: dict[str, float] = {
+        "LIMIT_UP_PULLBACK": 0.08,
+        "VOLUME_SURGE_LEADER": 0.07,
+        "THEME_CATALYST": 0.07,
+        "REVERSAL": 0.05,
+    }
+
     def _process_v3_buy_proposal(self, proposal: dict) -> dict:
         ticker = str(proposal["ticker"])
         normalized_setup = _normalize_setup_name(proposal.get("setup"))
-        stop_loss_price = float(proposal["stop_loss_price"])
         snapshot = self._market_data.get_snapshot(ticker)
         entry_price = snapshot.current_price
+
+        raw_stop = proposal.get("stop_loss_price")
+        if raw_stop is None:
+            stop_pct = self._DEFAULT_STOP_PCT_BY_SETUP.get(normalized_setup, 0.07)
+            stop_loss_price = round(entry_price * (1 - stop_pct))
+            logger.info(
+                f"[BUY] {ticker} stop_loss_price 미제공 → 기본값 적용 "
+                f"({normalized_setup} -{stop_pct*100:.0f}%): {stop_loss_price:,.0f}원"
+            )
+        else:
+            stop_loss_price = float(raw_stop)
         # 텔레그램 승인/주문 로그에 종목명이 보이도록 스냅샷에서 해석 (없으면 코드로 폴백)
         stock_name = getattr(snapshot, "name", "") or ticker
         atr = self._estimate_atr(ticker)

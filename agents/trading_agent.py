@@ -309,17 +309,19 @@ class TradingAgent:
                     response = self._maybe_backfill_scan_result(context, tool_history, response)
                     return self._attach_tool_history(response, tool_history)
 
-                # INTRADAY: 도구 호출 없이 바로 HOLD/NO_TRADE를 냈으면 강제 재시도.
-                # LLM이 실시간 데이터 없이 판단하면 세력 이탈 신호를 놓친다.
+                # INTRADAY: 도구 호출 없이 최종 판단을 내리면 강제 재시도.
+                # LLM이 실시간 데이터 없이 판단하면 세력 이탈 신호와 손절 기준을 놓친다.
                 if _phase_str == "INTRADAY" and not tool_history:
                     _action = (response.get("action") or "").upper()
-                    if _action in {"HOLD", "NO_TRADE"}:
+                    if _action in {"BUY", "SELL", "HOLD", "NO_TRADE"}:
                         transcript.append(json.dumps({
                             "error": "tool_call_required",
                             "instruction": (
                                 "도구 호출 없이 판단 금지. "
                                 "반드시 get_watchlist_intraday_snapshot을 먼저 호출해 "
-                                "실시간 분봉·거래대금 데이터를 확인한 후 판단하라. "
+                                "실시간 분봉·거래대금 데이터를 확인하고, "
+                                "BUY/SELL 후보가 있으면 필요 시 get_intraday_volume_trend 또는 "
+                                "get_intraday_candles(force_refresh=true)까지 호출한 후 판단하라. "
                                 "도구 호출 형식: {\"next_action\": \"call_tool\", "
                                 "\"tool\": \"get_watchlist_intraday_snapshot\", "
                                 "\"tool_args\": {\"tickers\": [\"종목코드\"]}}"
