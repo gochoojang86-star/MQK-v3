@@ -77,11 +77,36 @@
     "intraday_focus": ["내일 장초반 반드시 확인할 섹터/수급 포인트"],
     "tomorrow_watch_items": ["내일 확인할 이벤트·뉴스·공시"],
     "missed_today": ["오늘 놓쳤는데 내일도 유효할 수 있는 종목"],
-    "system_gaps": ["해결이 필요한 시스템 한계"]
+    "system_gaps": ["해결이 필요한 시스템 한계"],
+    "premarket_entry_candidates": [
+      {
+        "ticker": "000660",
+        "name": "SK하이닉스",
+        "theme": "반도체",
+        "setup": "VOLUME_SURGE_LEADER|THEME_CATALYST|REVERSAL",
+        "role": "본류 대장주",
+        "entry_condition": {
+          "min_open_change_pct": -2.0,
+          "max_open_change_pct": 8.0,
+          "min_5min_trading_value": 50000000000
+        },
+        "reason": "전날 세력 수급 + 테마 모멘텀 유효 — 갭 범위 내 시가 + 초반 거래대금 확인 시 즉시 진입"
+      }
+    ]
   },
   "reason": ""
 }
 ```
+
+## premarket_entry_candidates 작성 규칙
+
+`next_day_premarket_context.premarket_entry_candidates`에 내일 09:00~09:17 장초반 즉시 진입을 검토할 Top 3~5 종목을 남겨라.
+이 목록은 내일 premarket_watcher가 읽어 09:05~09:10 거래대금 폭증 시 intraday를 즉시 트리거한다.
+
+- **등재 기준**: 오늘 거래대금 상위 + 테마/수급 모멘텀이 내일도 유효할 가능성이 높은 종목만
+- `min_open_change_pct` / `max_open_change_pct`: 갭이 이 범위를 벗어나면 추격/갭하락 위험 — 진입 스킵
+- `min_5min_trading_value`: 09:05까지 이 거래대금(원) 미달 시 세력 미참여로 판단 — 진입 스킵
+- 비어있어도 됨 — 내일 강한 후보가 없으면 빈 배열 `[]` 반환
 
 ## Forbidden
 - 매수/매도 proposal 생성 금지 (분석 전용 단계)

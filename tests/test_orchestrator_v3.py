@@ -1,6 +1,7 @@
 """OrchestratorV3 테스트 - drift_state/watchlist 영속화 + Phase 오케스트레이션"""
 import json
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -429,13 +430,68 @@ def test_evaluate_regime_v3_injects_premarket_flow_into_regime_context(monkeypat
     orch.warm_atr_cache = lambda: None
     orch._telegram = type("_Telegram", (), {"notify": lambda self, msg: None})()
 
-    status = orch._evaluate_regime_v3()
+    status = orch._evaluate_regime_v3(now=datetime(2026, 7, 3, 9, 15))
 
     flow = orch._regime_agent.last_market_ctx["premarket_flow"]
     assert flow["sector_investor_flow_top"][0]["sector_name"] == "반도체"
     assert flow["program_netbuy_top"][0]["ticker"] == "000660"
     assert flow["foreign_netbuy_top"][0]["ticker"] == "005930"
     assert status["premarket_flow"]["institution_netbuy_top"][0]["ticker"] == "000660"
+
+
+def test_evaluate_regime_v3_skips_investor_flow_calls_before_market_open(monkeypatch, tmp_path):
+    """08:50 premarket_first 사고: 정규장(09:00) 개장 전엔 국내 투자자별 수급(외인/기관/
+    프로그램) 데이터 자체가 존재하지 않아 API는 성공하지만 전부 0/빈값으로 돌아온다.
+    LLM이 이걸 '오늘 수급이 없다'로 오독하지 않도록, 개장 전엔 아예 호출하지 않고
+    명시적으로 '아직 데이터 없음'을 표시해야 한다."""
+    import market_intelligence.market as mil_market
+    import market_intelligence.screening as mil_screening
+
+    monkeypatch.setattr(mil_market, "get_market_context", lambda ctx, phase: {
+        "kospi_change_pct": 0.0, "kosdaq_change_pct": 0.0,
+        "kospi_trading_value": 0, "kosdaq_trading_value": 0,
+        "prev_kospi_change_pct": -0.2, "prev_kosdaq_change_pct": 0.1,
+        "prev_kospi_trading_value": 900_000_000, "prev_kosdaq_trading_value": 700_000_000,
+        "kospi": 2700.0, "kosdaq": 900.0,
+    })
+    monkeypatch.setattr(mil_market, "get_sector_breadth", lambda ctx, phase: {
+        "market_breadth": {"advancers": 0, "decliners": 0}, "sectors": [],
+    })
+    monkeypatch.setattr(mil_market, "get_news_market", lambda ctx, phase: {"headlines": []})
+    monkeypatch.setattr(mil_market, "get_us_market_context", lambda ctx, phase: {"nasdaq": 1})
+
+    calls = []
+    monkeypatch.setattr(mil_screening, "get_sector_investor_flow",
+                         lambda ctx, phase: calls.append("sector_investor_flow") or {"sectors": [], "missing_fields": []})
+    monkeypatch.setattr(mil_screening, "get_program_netbuy_rank",
+                         lambda ctx, phase: calls.append("program_netbuy_rank") or {"stocks": [], "missing_fields": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_institution_rank",
+                         lambda ctx, phase: calls.append("foreign_institution_rank") or {
+                             "foreign_netbuy_top": [], "institution_netbuy_top": [], "missing_fields": []})
+
+    class StubRegimeAgent:
+        def judge(self, market_ctx, evaluation_mode="OPENING", evaluation_time=None, prev_regime=None):
+            self.last_market_ctx = market_ctx
+            return type("Regime", (), {
+                "status": type("Status", (), {"value": "YELLOW"})(),
+                "regime": type("RegimeValue", (), {"value": "SIDEWAYS"})(),
+                "confidence": 50, "reason": "ok", "risk_notes": [],
+                "opportunity_mode": type("Mode", (), {"value": "NORMAL"})(),
+                "scanner_mode": type("Scanner", (), {"value": "TREND"})(),
+                "risk_guidance": {"buy_confidence_threshold": 75},
+                "drift_triggers": [], "cooldown_minutes": 60, "max_daily_triggers": 3,
+            })()
+
+    orch = make_orchestrator(tmp_path)
+    orch._regime_agent = StubRegimeAgent()
+    orch.warm_atr_cache = lambda: None
+    orch._telegram = type("_Telegram", (), {"notify": lambda self, msg: None})()
+
+    status = orch._evaluate_regime_v3(now=datetime(2026, 7, 3, 8, 50))
+
+    assert calls == []
+    assert status["premarket_flow"]["data_available"] is False
+    assert "market_not_open_yet" in status["premarket_flow"]["missing_fields"]
 
 
 def test_run_intraday_v3_degrades_when_snapshot_unavailable(monkeypatch, tmp_path):
@@ -858,6 +914,16 @@ def test_build_scan_candidate_pool_prioritizes_reversal_leaders_in_risk_off(monk
         "get_foreign_institution_rank",
         lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": [{"ticker": "161890", "name": "한국콜마"}]},
     )
+    monkeypatch.setattr(
+        mil_screening,
+        "get_sector_investor_flow",
+        lambda ctx, phase: {
+            "sectors": [
+                {"sector_name": "반도체", "institution_net": -700000000000, "foreign_net": -900000000000},
+                {"sector_name": "화장품", "institution_net": 200000000000, "foreign_net": 100000000000},
+            ]
+        },
+    )
     monkeypatch.setattr(mil_screening, "get_foreign_continuous_rank", lambda ctx, phase: {"stocks": []})
     monkeypatch.setattr(mil_screening, "get_volume_surge", lambda ctx, phase: {"stocks": []})
     monkeypatch.setattr(
@@ -878,6 +944,11 @@ def test_build_scan_candidate_pool_prioritizes_reversal_leaders_in_risk_off(monk
     top_tickers = [item["ticker"] for item in pool[:2]]
     assert "000660" in top_tickers
     assert "161890" in top_tickers
+    reversal_item = next(item for item in pool if item["ticker"] == "000660")
+    assert reversal_item["facts"]["reversal_candidate"] is True
+    assert reversal_item["facts"]["panic_sell_candidate"] is True
+    assert reversal_item["facts"]["sector_selloff_leader"] is True
+    assert reversal_item["facts"]["reversal_priority"] == 2
 
 
 def test_build_scan_candidate_pool_keeps_default_order_when_not_risk_off(monkeypatch, tmp_path):
@@ -902,6 +973,7 @@ def test_build_scan_candidate_pool_keeps_default_order_when_not_risk_off(monkeyp
         "get_attention_rank",
         lambda ctx, phase: {"kiwoom_viewing_rank": [{"ticker": "123456", "name": "테마후발주", "rank": 1}], "kis_hts_top": []},
     )
+    monkeypatch.setattr(mil_screening, "get_sector_investor_flow", lambda ctx, phase: {"sectors": []})
     monkeypatch.setattr(mil_screening, "get_program_netbuy_rank", lambda ctx, phase: {"stocks": []})
     monkeypatch.setattr(mil_screening, "get_foreign_institution_rank", lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": []})
     monkeypatch.setattr(mil_screening, "get_foreign_continuous_rank", lambda ctx, phase: {"stocks": []})
@@ -921,6 +993,7 @@ def test_build_scan_candidate_pool_keeps_default_order_when_not_risk_off(monkeyp
     pool = orch._build_scan_candidate_pool(regime={"status": "YELLOW", "regime": "SIDEWAYS"})
 
     assert pool[0]["ticker"] == "123456"
+    assert next(item for item in pool if item["ticker"] == "000660")["facts"]["reversal_candidate"] is True
 
 
 def test_run_scan_v3_keeps_monitoring_watchlist_when_positions_full(monkeypatch, tmp_path):

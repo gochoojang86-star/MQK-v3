@@ -215,6 +215,17 @@ def _risk_off_leader_priority_tuple(item: dict) -> tuple[int, int, int]:
     return (max(is_reversal, is_defensive_or_supported), is_reversal, has_flow)
 
 
+def _sector_theme_matches(theme_hints: list[str], sector_name: str) -> bool:
+    sector_norm = re.sub(r"\s+", "", str(sector_name or "")).lower()
+    if not sector_norm:
+        return False
+    for hint in theme_hints or []:
+        hint_norm = re.sub(r"\s+", "", str(hint or "")).lower()
+        if hint_norm and (sector_norm in hint_norm or hint_norm in sector_norm):
+            return True
+    return False
+
+
 def _diversify_by_theme(
     candidates: list[dict],
     limit: int,
@@ -1258,6 +1269,10 @@ class MQKOrchestratorV3:
                     "theme_hints": [],
                     "change_pct": None,
                     "trading_value_krw": None,
+                    "reversal_candidate": False,
+                    "reversal_priority": 0,
+                    "panic_sell_candidate": False,
+                    "sector_selloff_leader": False,
                 },
                 "why_in_pool": [],
             })
@@ -1382,6 +1397,21 @@ class MQKOrchestratorV3:
         except Exception as e:
             logger.warning(f"[SCAN POOL] theme_candidates 실패: {e}")
 
+        top_sold_sector_names: list[str] = []
+        try:
+            sector_flow = mil_screening.get_sector_investor_flow(self._mil, phase)
+            sectors = sector_flow.get("sectors") or []
+            sold_sectors = sorted(
+                (
+                    s for s in sectors
+                    if _to_float(s.get("institution_net")) + _to_float(s.get("foreign_net")) < 0
+                ),
+                key=lambda s: _to_float(s.get("institution_net")) + _to_float(s.get("foreign_net")),
+            )
+            top_sold_sector_names = [str(s.get("sector_name") or "") for s in sold_sectors[:3] if s.get("sector_name")]
+        except Exception as e:
+            logger.warning(f"[SCAN POOL] sector_investor_flow 실패: {e}")
+
         candidates = list(pool.values())
         for item in candidates:
             item["why_in_pool"] = sorted(set(item["why_in_pool"]))
@@ -1389,10 +1419,25 @@ class MQKOrchestratorV3:
         # TV rank는 대형주 편향이 강하므로 tiebreaker로만 사용.
         risk_off_mode = _is_risk_off_regime(regime)
         for item in candidates:
+            facts = item["facts"]
+            tv_rank = facts.get("trading_value_rank")
+            change_pct = _to_float(facts.get("change_pct"))
+            top_liquidity = isinstance(tv_rank, int) and tv_rank <= 12
+            panic_sell_candidate = top_liquidity and change_pct <= -5.0
+            sector_selloff_leader = panic_sell_candidate and any(
+                _sector_theme_matches(facts.get("theme_hints") or [], sector_name)
+                for sector_name in top_sold_sector_names
+            )
+            reversal_priority = 2 if sector_selloff_leader else (1 if panic_sell_candidate else 0)
+            facts["panic_sell_candidate"] = panic_sell_candidate
+            facts["sector_selloff_leader"] = sector_selloff_leader
+            facts["reversal_candidate"] = reversal_priority > 0
+            facts["reversal_priority"] = reversal_priority
             item["_signal_count"] = len(item["why_in_pool"])
             item["_risk_off_leader_priority"] = _risk_off_leader_priority_tuple(item)
         candidates.sort(
             key=lambda item: (
+                item["facts"]["reversal_priority"] if risk_off_mode else 0,
                 item["_risk_off_leader_priority"][0] if risk_off_mode else 0,
                 item["_risk_off_leader_priority"][1] if risk_off_mode else 0,
                 item["_risk_off_leader_priority"][2] if risk_off_mode else 0,
@@ -2386,32 +2431,49 @@ class MQKOrchestratorV3:
             theme_exposure=theme_exposure,
         )
 
-    def _evaluate_regime_v3(self) -> dict:
-        now = datetime.now()
+    def _evaluate_regime_v3(self, now: datetime | None = None) -> dict:
+        now = now or datetime.now()
         evaluation_mode = _resolve_regime_evaluation_mode(now)
         logger.info("[V3 %s] 레짐 평가 시작 (%s)", now.strftime("%H:%M"), evaluation_mode)
 
         market_context = mil_market.get_market_context(self._mil, TradingPhase.PREMARKET.value)
         breadth_data = mil_market.get_sector_breadth(self._mil, TradingPhase.PREMARKET.value)
         news_payload = mil_market.get_news_market(self._mil, TradingPhase.PREMARKET.value)
-        try:
-            sector_flow = mil_screening.get_sector_investor_flow(self._mil, TradingPhase.PREMARKET.value)
-        except Exception as e:
-            logger.warning(f"[V3 PREMARKET] 장전 업종 수급 조회 실패 — 레짐 판단에서 제외: {e}")
-            sector_flow = {"sectors": None, "missing_fields": [f"sector_investor_flow({e})"]}
-        try:
-            program_rank = mil_screening.get_program_netbuy_rank(self._mil, TradingPhase.PREMARKET.value)
-        except Exception as e:
-            logger.warning(f"[V3 PREMARKET] 장전 프로그램 수급 조회 실패 — 레짐 판단에서 제외: {e}")
-            program_rank = {"stocks": None, "missing_fields": [f"program_netbuy_rank({e})"]}
-        try:
-            foreign_inst_rank = mil_screening.get_foreign_institution_rank(self._mil, TradingPhase.PREMARKET.value)
-        except Exception as e:
-            logger.warning(f"[V3 PREMARKET] 장전 외인/기관 수급 조회 실패 — 레짐 판단에서 제외: {e}")
+
+        # 국내 투자자별 수급(업종/프로그램/외인·기관) 데이터는 정규장(09:00) 개장 전엔
+        # 존재하지 않는다 — API 호출 자체는 성공하지만 모든 수치가 0/빈값으로 돌아와
+        # "오늘 수급이 없다"로 오독될 수 있다(2026-07-03 확인: premarket_first 08:50에
+        # 호출 시 전종목 순매수 "+0"). 개장 전엔 아예 호출하지 않고 명시적으로
+        # data_available=False를 표시한다.
+        market_is_open = (now.hour, now.minute) >= (9, 0)
+        if market_is_open:
+            try:
+                sector_flow = mil_screening.get_sector_investor_flow(self._mil, TradingPhase.PREMARKET.value)
+            except Exception as e:
+                logger.warning(f"[V3 PREMARKET] 장전 업종 수급 조회 실패 — 레짐 판단에서 제외: {e}")
+                sector_flow = {"sectors": None, "missing_fields": [f"sector_investor_flow({e})"]}
+            try:
+                program_rank = mil_screening.get_program_netbuy_rank(self._mil, TradingPhase.PREMARKET.value)
+            except Exception as e:
+                logger.warning(f"[V3 PREMARKET] 장전 프로그램 수급 조회 실패 — 레짐 판단에서 제외: {e}")
+                program_rank = {"stocks": None, "missing_fields": [f"program_netbuy_rank({e})"]}
+            try:
+                foreign_inst_rank = mil_screening.get_foreign_institution_rank(self._mil, TradingPhase.PREMARKET.value)
+            except Exception as e:
+                logger.warning(f"[V3 PREMARKET] 장전 외인/기관 수급 조회 실패 — 레짐 판단에서 제외: {e}")
+                foreign_inst_rank = {
+                    "foreign_netbuy_top": None,
+                    "institution_netbuy_top": None,
+                    "missing_fields": [f"foreign_institution_rank({e})"],
+                }
+        else:
+            logger.info("[V3 PREMARKET] 정규장 개장 전(%s) — 국내 투자자별 수급 조회 스킵", now.strftime("%H:%M"))
+            sector_flow = {"sectors": None, "missing_fields": ["market_not_open_yet"]}
+            program_rank = {"stocks": None, "missing_fields": ["market_not_open_yet"]}
             foreign_inst_rank = {
                 "foreign_netbuy_top": None,
                 "institution_netbuy_top": None,
-                "missing_fields": [f"foreign_institution_rank({e})"],
+                "missing_fields": ["market_not_open_yet"],
             }
         market_news_summary = " | ".join(
             str(item.get("title") or "")
@@ -2450,6 +2512,7 @@ class MQKOrchestratorV3:
             "market_news_summary": market_news_summary,
             "sector_performance": self._sector_performance,
             "premarket_flow": {
+                "data_available": market_is_open,
                 "sector_investor_flow_top": [
                     {
                         "sector_name": row.get("sector_name"),

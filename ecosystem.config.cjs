@@ -102,6 +102,16 @@ module.exports = {
       autorestart: false,
     },
     {
+      name: "mqk-v3-premarket-watcher",
+      script: "/mnt/c/Users/gocho/MQK-v2/.venv/bin/python",
+      args: "/mnt/c/Users/gocho/MQK-v2/run_premarket_watcher.py",
+      cwd: "/mnt/c/Users/gocho/MQK-v2",
+      // KST 09:00 — 장초반 선진입 후보 감시 (09:05~09:17 실제 폴링, 09:17 종료).
+      // market_close가 남긴 premarket_entry_candidates 조건 충족 시 intraday 즉시 트리거.
+      cron_restart: "0 9 * * 1-5",
+      autorestart: false,
+    },
+    {
       name: "mqk-v3-psearch-watcher",
       script: "/mnt/c/Users/gocho/MQK-v2/.venv/bin/python",
       args: "/mnt/c/Users/gocho/MQK-v2/run_psearch_watcher.py",
