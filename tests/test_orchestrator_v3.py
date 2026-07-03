@@ -2028,6 +2028,40 @@ def test_late_intraday_runs_agent_on_crash(monkeypatch, tmp_path):
     assert "psearch_result" in allowed and "get_top_movers" in allowed
 
 
+def test_late_intraday_strips_resistance_breakout_buy_proposal(monkeypatch, tmp_path):
+    """최종 리뷰 지적사항: LATE_INTRADAY는 is_crash가 확정된 경우에만 실행되는데
+    _sanitize_intraday_result를 거치지 않아 RESISTANCE_BREAKOUT BUY가 걸러지지 않고
+    그대로 _handle_proposals로 흘러갈 수 있었다. 폭락일 실매수 경로이므로 반드시
+    코드로 막아야 한다."""
+    import market_intelligence.market as mil_market
+    import market_intelligence.portfolio as mil_portfolio
+
+    monkeypatch.setattr(mil_market, "get_market_context",
+                         lambda ctx, phase: {"kospi_change_pct": -3.5, "kosdaq_change_pct": -5.1})
+    monkeypatch.setattr(mil_portfolio, "get_open_positions",
+                         lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl",
+                         lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 1})
+
+    orch = make_orchestrator(tmp_path)
+    orch._trading_agent = FakeTradingAgent({
+        "action": "BUY",
+        "proposals": [
+            {"ticker": "005930", "side": "BUY", "setup": "RESISTANCE_BREAKOUT", "confidence": 80,
+             "stop_loss_price": 290000, "reason": "라운드피겨 돌파"},
+        ],
+        "reason": "돌파 진입",
+    })
+    _write_today_regime(tmp_path, monkeypatch, status="YELLOW")
+
+    handled = []
+    orch._handle_proposals = lambda proposals: handled.append(proposals) or []
+
+    orch.run_late_intraday_v3()
+
+    assert handled == [[]]
+
+
 def test_late_intraday_does_not_run_on_red_regime_without_index_crash(monkeypatch, tmp_path):
     import market_intelligence.market as mil_market
     import market_intelligence.portfolio as mil_portfolio

@@ -47,6 +47,7 @@ prev_open      전일 시가
 candle_count   당일 분봉 수
 recent_candles 최근 10개 분봉 [{time, open, high, low, close, volume}]
 intraday_trend 당일 추세 (up/down/flat)
+resistance     저항선 fact {resistance_20d_high, round_figure_price, is_breakout_20d_high, is_breakout_round_figure, volume_vs_5d_avg_ratio} — RESISTANCE_BREAKOUT 판단에 사용
 ```
 
 `day_open`, `day_high`, `day_low`, `prev_close`는 **수집된 경우에만** 존재한다. 없으면 `change_pct`와 분봉으로 추정하라.

@@ -738,6 +738,8 @@ def _compute_resistance_facts(candles: list[dict], current_price: float) -> dict
         round((current_price - round_figure_price) / round_figure_price * 100, 2)
         if round_figure_price > 0 else 0.0
     )
+    # today_open이 라운드 피겨와 정확히 같으면(이미 그 레벨에서 시작) 이 세션 안에서는
+    # "돌파"가 아니다 — 장 시작 전에 이미 그 레벨을 확보한 것으로 본다. 의도된 동작.
     is_breakout_round_figure = (
         round_figure_price > 0
         and today_open < round_figure_price

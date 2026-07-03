@@ -858,6 +858,11 @@ class MQKOrchestratorV3:
             TradingPhase.LATE_INTRADAY, regime, _drift_status(drift_state), watchlist=watchlist,
         )
         result = self._trading_agent.run(TradingPhase.LATE_INTRADAY, context)
+        # LATE_INTRADAY는 이 지점에 도달했다는 것 자체가 위 게이트를 통과했다는 뜻이라
+        # is_crash는 항상 true다 — RESISTANCE_BREAKOUT은 폭락일에 코드로 항상 차단한다
+        # (최종 리뷰 지적: 이 경로는 _sanitize_intraday_result를 거치지 않아 실매수까지
+        # 새어나갈 수 있었다).
+        result = self._sanitize_intraday_result(result, resistance_breakout_allowed=False)
         self._record_tool_request(result, TradingPhase.LATE_INTRADAY, regime)
         self._alert_on_tool_failures(result, TradingPhase.LATE_INTRADAY)
         self._merge_watchlist_additions(result)
