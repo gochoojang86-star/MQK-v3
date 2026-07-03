@@ -46,6 +46,7 @@ from market_intelligence import theme as mil_theme
 from market_intelligence.base import MILContext, ToolFailure
 from market_intelligence.cache import MILCache
 from market_intelligence.circuit_breaker import CircuitBreaker
+from market_intelligence.stock import _compute_resistance_facts
 
 logger = logging.getLogger("mqk_v3")
 
@@ -90,6 +91,7 @@ _INTRADAY_PROPOSAL_REASON_CODES = {
     "PRICE_SIGNAL",
     "LIMIT_UP_FAIL",
     "REVERSAL_PROFIT",
+    "RESISTANCE_BREAKOUT_ENTRY",
 }
 
 
@@ -185,6 +187,7 @@ def _infer_intraday_proposal_reason_code(proposal: dict) -> str:
         "LIMIT_UP_PULLBACK": "LIMIT_UP_PULLBACK_ENTRY",
         "RELATIVE_STRENGTH": "RELATIVE_STRENGTH_ENTRY",
         "TREND": "TREND_ENTRY",
+        "RESISTANCE_BREAKOUT": "RESISTANCE_BREAKOUT_ENTRY",
     }
     return setup_map.get(setup, "BUY_CANDIDATE")
 
@@ -663,6 +666,7 @@ class MQKOrchestratorV3:
         # 종목 뉴스 사전 주입 — pool 상위 우선순위 구간 종목의 뉴스를 코드가 수집해 facts에 embed.
         # LLM이 get_news_stock을 건너뛰더라도 촉매 판단 근거가 context에 이미 존재한다.
         self._prefetch_pool_news(context["candidate_pool"])
+        self._prefetch_pool_resistance(context["candidate_pool"])
 
         result = self._trading_agent.run(TradingPhase.SCAN, context)
         self._record_tool_request(result, TradingPhase.SCAN, regime)
@@ -797,7 +801,10 @@ class MQKOrchestratorV3:
         if is_crash:
             context["crash_reason"] = crash_reason
         result = self._trading_agent.run(TradingPhase.INTRADAY, context)
-        result = self._sanitize_intraday_result(result)
+        result = self._sanitize_intraday_result(
+            result,
+            resistance_breakout_allowed=context["exploration_policy"]["resistance_breakout_allowed"],
+        )
         self._record_tool_request(result, TradingPhase.INTRADAY, regime)
         self._alert_on_tool_failures(result, TradingPhase.INTRADAY)
         self._merge_watchlist_additions(result)
@@ -849,6 +856,11 @@ class MQKOrchestratorV3:
             TradingPhase.LATE_INTRADAY, regime, _drift_status(drift_state), watchlist=watchlist,
         )
         result = self._trading_agent.run(TradingPhase.LATE_INTRADAY, context)
+        # LATE_INTRADAY는 이 지점에 도달했다는 것 자체가 위 게이트를 통과했다는 뜻이라
+        # is_crash는 항상 true다 — RESISTANCE_BREAKOUT은 폭락일에 코드로 항상 차단한다
+        # (최종 리뷰 지적: 이 경로는 _sanitize_intraday_result를 거치지 않아 실매수까지
+        # 새어나갈 수 있었다).
+        result = self._sanitize_intraday_result(result, resistance_breakout_allowed=False)
         self._record_tool_request(result, TradingPhase.LATE_INTRADAY, regime)
         self._alert_on_tool_failures(result, TradingPhase.LATE_INTRADAY)
         self._merge_watchlist_additions(result)
@@ -1527,6 +1539,27 @@ class MQKOrchestratorV3:
             except Exception as e:
                 logger.debug(f"[SCAN POOL NEWS] {ticker} 뉴스 수집 실패 (스킵): {e}")
 
+    def _prefetch_pool_resistance(self, pool: list[dict], top_n: int | None = None) -> None:
+        """pool 상위 우선순위 구간 종목의 저항선/라운드피겨 fact를 코드가 미리 계산해 embed한다.
+
+        get_ohlcv 실패는 해당 종목만 스킵 (전체 SCAN 중단 없음). _prefetch_pool_news와
+        동일한 비용 상한 패턴 — 상위 top_n개만 조회.
+        """
+        phase = TradingPhase.SCAN.value
+        if top_n is None:
+            top_n = min(len(pool), 15)
+        for item in pool[:top_n]:
+            ticker = item.get("ticker", "")
+            if not ticker:
+                continue
+            try:
+                ohlcv = mil_stock.get_ohlcv(self._mil, phase, ticker, period=25)
+                item["facts"]["resistance"] = _compute_resistance_facts(
+                    ohlcv.get("candles", []), ohlcv.get("current_price", 0.0)
+                )
+            except Exception as e:
+                logger.debug(f"[SCAN POOL RESISTANCE] {ticker} 저항선 계산 실패 (스킵): {e}")
+
     # ── 컨텍스트/스냅샷 빌더 ───────────────────────────────────────────────────
 
     def _build_context(
@@ -1669,6 +1702,7 @@ class MQKOrchestratorV3:
                             float(risk_guidance.get("buy_confidence_threshold", 75.0)) - 5.0,
                         )
                     ),
+                    "resistance_breakout_allowed": not (_is_risk_off_regime(regime) or is_crash),
                 }
                 if phase == TradingPhase.INTRADAY
                 else None
@@ -1698,7 +1732,7 @@ class MQKOrchestratorV3:
             save_watchlist(merged, path=_WATCHLIST_PATH)
             logger.info(f"[WATCHLIST MERGE] intraday additions={additions} → {[entry['ticker'] for entry in merged]}")
 
-    def _sanitize_intraday_result(self, result: dict) -> dict:
+    def _sanitize_intraday_result(self, result: dict, resistance_breakout_allowed: bool = True) -> dict:
         if not isinstance(result, dict):
             return {
                 "action": "NO_TRADE",
@@ -1719,6 +1753,16 @@ class MQKOrchestratorV3:
                 continue
             side = str(proposal.get("side") or "").upper()
             if side not in {"BUY", "SELL"}:
+                continue
+            if (
+                not resistance_breakout_allowed
+                and side == "BUY"
+                and _normalize_setup_name(proposal.get("setup")) == "RESISTANCE_BREAKOUT"
+            ):
+                logger.warning(
+                    f"[V3 INTRADAY] resistance_breakout_allowed=False인데 RESISTANCE_BREAKOUT BUY "
+                    f"proposal 포함({proposal.get('ticker')}) — 안전상 제거"
+                )
                 continue
             proposal_reason_code = _normalize_reason_code(proposal.get("standardized_reason_code"))
             if proposal_reason_code not in _INTRADAY_PROPOSAL_REASON_CODES:

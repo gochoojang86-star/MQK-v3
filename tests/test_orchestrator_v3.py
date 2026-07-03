@@ -1439,6 +1439,7 @@ def test_run_intraday_v3_stable_executes_no_trade(monkeypatch, tmp_path):
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["allow_intraday_discovery"] is True
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["volume_trend_use_averages"] is True
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] == 70.0
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["resistance_breakout_allowed"] is True
     saved_drift = json.loads((tmp_path / "drift_state.json").read_text(encoding="utf-8"))
     assert saved_drift["today_caution_count"] == 0
 
@@ -1534,6 +1535,46 @@ def test_run_intraday_v3_disables_leader_reentry_floor_when_live_is_crash_even_i
     orch.run_intraday_v3()
 
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] is None
+
+
+def test_run_intraday_v3_disables_resistance_breakout_during_risk_off_regime(monkeypatch, tmp_path):
+    import market_intelligence.portfolio as mil_portfolio
+    import market_intelligence.market as mil_market
+
+    monkeypatch.setattr(mil_portfolio, "get_open_positions",
+                         lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl",
+                         lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 10_000_000})
+    monkeypatch.setattr(mil_market, "get_market_context",
+                         lambda ctx, phase: {"kospi_change_pct": -7.0, "kosdaq_change_pct": -6.0, "foreign_net_buy_krw": 0})
+    monkeypatch.setattr(mil_market, "get_intraday_index_candles", lambda ctx, phase: {"candles": []})
+    monkeypatch.setattr(mil_market, "get_sector_breadth", lambda ctx, phase: {"market_breadth": {}})
+
+    orch = make_orchestrator(tmp_path)
+    orch._drift_detector = FakeDriftDetector({
+        "drift_judgment": "STABLE", "reason": "no_trigger_fired", "metrics": {}, "triggered": [],
+        "new_status": None, "risk_guidance_delta": {},
+        "drift_state": {"date": "2026-06-09", "last_trigger_time": {}, "today_caution_count": 0, "daily_lite_llm_calls": 0},
+    })
+    orch._trading_agent = FakeTradingAgent({"action": "NO_TRADE", "proposals": [], "reason": "폭락장 관망"})
+
+    regime = {
+        "status": "RED", "regime": "RISK_OFF", "confidence": 90,
+        "risk_guidance": {"max_positions": 4, "buy_confidence_threshold": 75,
+                           "risk_per_trade_pct": 0.35, "min_trading_value_krw": 1_000_000_000},
+        "drift_triggers": [], "cooldown_minutes": 60, "max_daily_triggers": 3,
+        "timestamp": "2026-06-09T08:45:00",
+    }
+    (tmp_path / "last_regime.json").write_text(json.dumps(regime), encoding="utf-8")
+    (tmp_path / "watchlist.json").write_text(json.dumps({"watchlist": ["005930"]}), encoding="utf-8")
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    orch.run_intraday_v3()
+
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["resistance_breakout_allowed"] is False
 
 
 def test_run_intraday_v3_merges_watchlist_additions(monkeypatch, tmp_path):
@@ -1659,6 +1700,39 @@ def test_sanitize_intraday_result_preserves_explicit_standardized_reason_codes(t
     )
 
     assert result["standardized_reason_code"] == "STALE_REGIME"
+
+
+def test_sanitize_intraday_result_strips_resistance_breakout_buy_when_not_allowed(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    result = {
+        "action": "BUY",
+        "proposals": [
+            {"ticker": "005930", "side": "BUY", "setup": "RESISTANCE_BREAKOUT", "confidence": 80,
+             "stop_loss_price": 290000, "reason": "라운드피겨 돌파"},
+        ],
+        "reason": "돌파 진입",
+    }
+
+    sanitized = orch._sanitize_intraday_result(result, resistance_breakout_allowed=False)
+
+    assert sanitized["proposals"] == []
+
+
+def test_sanitize_intraday_result_keeps_resistance_breakout_buy_when_allowed(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    result = {
+        "action": "BUY",
+        "proposals": [
+            {"ticker": "005930", "side": "BUY", "setup": "RESISTANCE_BREAKOUT", "confidence": 80,
+             "stop_loss_price": 290000, "reason": "라운드피겨 돌파"},
+        ],
+        "reason": "돌파 진입",
+    }
+
+    sanitized = orch._sanitize_intraday_result(result, resistance_breakout_allowed=True)
+
+    assert len(sanitized["proposals"]) == 1
+    assert sanitized["proposals"][0]["standardized_reason_code"] == "RESISTANCE_BREAKOUT_ENTRY"
 
 
 def test_run_intraday_v3_skips_on_stale_regime(monkeypatch, tmp_path):
@@ -1949,6 +2023,40 @@ def test_late_intraday_runs_agent_on_crash(monkeypatch, tmp_path):
     assert orch._trading_agent.calls[0][0] == TradingPhase.LATE_INTRADAY
     allowed = orch._trading_agent.calls[0][1]["allowed_tools"]
     assert "psearch_result" in allowed and "get_top_movers" in allowed
+
+
+def test_late_intraday_strips_resistance_breakout_buy_proposal(monkeypatch, tmp_path):
+    """최종 리뷰 지적사항: LATE_INTRADAY는 is_crash가 확정된 경우에만 실행되는데
+    _sanitize_intraday_result를 거치지 않아 RESISTANCE_BREAKOUT BUY가 걸러지지 않고
+    그대로 _handle_proposals로 흘러갈 수 있었다. 폭락일 실매수 경로이므로 반드시
+    코드로 막아야 한다."""
+    import market_intelligence.market as mil_market
+    import market_intelligence.portfolio as mil_portfolio
+
+    monkeypatch.setattr(mil_market, "get_market_context",
+                         lambda ctx, phase: {"kospi_change_pct": -3.5, "kosdaq_change_pct": -5.1})
+    monkeypatch.setattr(mil_portfolio, "get_open_positions",
+                         lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl",
+                         lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 1})
+
+    orch = make_orchestrator(tmp_path)
+    orch._trading_agent = FakeTradingAgent({
+        "action": "BUY",
+        "proposals": [
+            {"ticker": "005930", "side": "BUY", "setup": "RESISTANCE_BREAKOUT", "confidence": 80,
+             "stop_loss_price": 290000, "reason": "라운드피겨 돌파"},
+        ],
+        "reason": "돌파 진입",
+    })
+    _write_today_regime(tmp_path, monkeypatch, status="YELLOW")
+
+    handled = []
+    orch._handle_proposals = lambda proposals: handled.append(proposals) or []
+
+    orch.run_late_intraday_v3()
+
+    assert handled == [[]]
 
 
 def test_late_intraday_does_not_run_on_red_regime_without_index_crash(monkeypatch, tmp_path):
@@ -2678,3 +2786,70 @@ def test_run_premarket_early_v3_reconciles_first(tmp_path, monkeypatch):
     orch.run_premarket_early_v3()
 
     assert calls == ["reconcile"]
+
+
+def test_prefetch_pool_resistance_bounds_to_top_15(monkeypatch, tmp_path):
+    import market_intelligence.stock as mil_stock
+
+    calls = []
+
+    def fake_get_ohlcv(ctx, phase, ticker, period=60):
+        calls.append(ticker)
+        return {
+            "current_price": 100_000.0,
+            "candles": [{"open": 90_000, "high": 95_000, "low": 89_000, "close": 94_000,
+                         "trading_value": 1_000_000_000.0} for _ in range(20)]
+                       + [{"open": 94_000, "high": 101_000, "low": 93_500, "close": 100_500,
+                           "trading_value": 1_000_000_000.0}],
+        }
+
+    monkeypatch.setattr(mil_stock, "get_ohlcv", fake_get_ohlcv)
+
+    orch = make_orchestrator(tmp_path)
+    pool = [{"ticker": f"{i:06d}", "facts": {}} for i in range(20)]
+
+    orch._prefetch_pool_resistance(pool)
+
+    assert len(calls) == 15
+    assert "resistance" in pool[0]["facts"]
+    assert pool[0]["facts"]["resistance"]["is_breakout_20d_high"] is True
+    assert "resistance" not in pool[15]["facts"]
+
+
+def test_prefetch_pool_resistance_skips_ticker_on_fetch_failure(monkeypatch, tmp_path):
+    import market_intelligence.stock as mil_stock
+
+    monkeypatch.setattr(mil_stock, "get_ohlcv", lambda ctx, phase, ticker, period=60: (_ for _ in ()).throw(RuntimeError("api down")))
+
+    orch = make_orchestrator(tmp_path)
+    pool = [{"ticker": "005930", "facts": {}}]
+
+    orch._prefetch_pool_resistance(pool)  # 예외 전파 없이 조용히 스킵돼야 함
+
+    assert "resistance" not in pool[0]["facts"]
+
+
+def test_run_scan_v3_calls_prefetch_pool_resistance(monkeypatch, tmp_path):
+    orch = make_orchestrator(tmp_path)
+    calls = []
+    orch._prefetch_pool_resistance = lambda pool, top_n=None: calls.append("resistance")
+    orch._prefetch_pool_news = lambda pool, top_n=None: calls.append("news")
+    orch._build_scan_candidate_pool = lambda regime=None: []
+    orch._build_scan_market_story_brief = lambda: {}
+    orch._build_context = lambda *a, **k: {"candidate_pool": []}
+    orch._trading_agent = FakeTradingAgent({
+        "next_action": "final", "action": "WAIT", "watchlist": [], "candidates": [], "reason": "",
+    })
+    orch._record_tool_request = lambda *a, **k: None
+    orch._alert_on_tool_failures = lambda *a, **k: None
+    orch._save_json = lambda *a, **k: None
+    orch._apply_scan_diversity_guard = lambda result, context: result
+    orch._watchlist_entries_from_scan_result = lambda result: []
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    orch.run_scan_v3()
+
+    assert calls == ["news", "resistance"]

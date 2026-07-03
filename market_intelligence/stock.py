@@ -4,6 +4,7 @@ get_snapshot은 제거되었다 — get_ohlcv의 output1이 현재가+호가+밸
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 from broker.kiwoom_api import _abs_float, _abs_int
@@ -438,6 +439,15 @@ def get_watchlist_intraday_snapshot(ctx: MILContext, phase: str, tickers: list[s
                 missing_fields.append("intraday_candles")
 
             try:
+                ohlcv = get_ohlcv(ctx, phase, ticker, period=25)
+                item["resistance"] = _compute_resistance_facts(
+                    ohlcv.get("candles", []), item.get("price", 0.0)
+                )
+            except Exception:
+                item["resistance"] = _compute_resistance_facts([], 0.0)
+                missing_fields.append("resistance")
+
+            try:
                 status = get_stock_status(ctx, phase, ticker)
                 item["status"] = {
                     "trading_halted": bool(status.get("trading_halted")),
@@ -691,6 +701,89 @@ def _to_float(value) -> float:
         return float(str(value).replace(",", ""))
     except (ValueError, TypeError):
         return 0.0
+
+
+_ROUND_FIGURE_TIERS = [
+    (10_000, 1_000),
+    (100_000, 5_000),
+    (1_000_000, 10_000),
+]
+_ROUND_FIGURE_DEFAULT_UNIT = 100_000
+
+
+def _round_figure_unit(price: float) -> float:
+    """가격대별 라운드 피겨 단위. 1만원 미만=1,000원, ~10만원=5,000원, ~100만원=10,000원, 그 이상=100,000원."""
+    for threshold, unit in _ROUND_FIGURE_TIERS:
+        if price < threshold:
+            return unit
+    return _ROUND_FIGURE_DEFAULT_UNIT
+
+
+def _compute_resistance_facts(candles: list[dict], current_price: float) -> dict:
+    """일봉 candle 리스트(get_ohlcv의 candles, 최근이 마지막)와 현재가로 저항선 fact를 계산한다.
+
+    candles의 마지막 항목은 장중이면 당일(미마감) 봉이다. 20일 고점 계산에서는
+    제외하고, 그 open을 당일 시가로 사용해 라운드피겨 돌파 여부를 판정한다.
+    모든 계산은 여기서 끝낸다 — LLM은 이 결과값만 읽는다.
+    """
+    empty = {
+        "resistance_20d_high": 0.0,
+        "pct_from_resistance": 0.0,
+        "round_figure_price": 0.0,
+        "pct_from_round_figure": 0.0,
+        "is_breakout_20d_high": False,
+        "is_breakout_round_figure": False,
+        "volume_vs_5d_avg_ratio": 0.0,
+    }
+    if current_price <= 0 or not candles:
+        return empty
+
+    today = candles[-1]
+    prior_candles = candles[:-1]
+
+    last_20 = prior_candles[-20:]
+    resistance_20d_high = max((c.get("high", 0.0) for c in last_20), default=0.0)
+    pct_from_resistance = (
+        round((current_price - resistance_20d_high) / resistance_20d_high * 100, 2)
+        if resistance_20d_high > 0 else 0.0
+    )
+    is_breakout_20d_high = resistance_20d_high > 0 and current_price > resistance_20d_high
+
+    today_open = today.get("open", 0.0) or 0.0
+    unit = _round_figure_unit(today_open if today_open > 0 else current_price)
+    round_figure_price = math.ceil(today_open / unit) * unit if today_open > 0 else 0.0
+    pct_from_round_figure = (
+        round((current_price - round_figure_price) / round_figure_price * 100, 2)
+        if round_figure_price > 0 else 0.0
+    )
+    # today_open이 라운드 피겨와 정확히 같으면(이미 그 레벨에서 시작) 이 세션 안에서는
+    # "돌파"가 아니다 — 장 시작 전에 이미 그 레벨을 확보한 것으로 본다. 의도된 동작.
+    is_breakout_round_figure = (
+        round_figure_price > 0
+        and today_open < round_figure_price
+        and current_price >= round_figure_price
+    )
+
+    last_5 = prior_candles[-5:]
+    avg_5d_trading_value = (
+        sum(c.get("trading_value", 0.0) for c in last_5) / len(last_5)
+        if last_5 else 0.0
+    )
+    today_trading_value = today.get("trading_value", 0.0) or 0.0
+    volume_vs_5d_avg_ratio = (
+        round(today_trading_value / avg_5d_trading_value, 2)
+        if avg_5d_trading_value > 0 else 0.0
+    )
+
+    return {
+        "resistance_20d_high": resistance_20d_high,
+        "pct_from_resistance": pct_from_resistance,
+        "round_figure_price": round_figure_price,
+        "pct_from_round_figure": pct_from_round_figure,
+        "is_breakout_20d_high": is_breakout_20d_high,
+        "is_breakout_round_figure": is_breakout_round_figure,
+        "volume_vs_5d_avg_ratio": volume_vs_5d_avg_ratio,
+    }
 
 
 def _normalize_tickers(values: list[str]) -> list[str]:

@@ -9,7 +9,101 @@ from market_intelligence.stock import (
     search_telegram_news,
     get_fundamentals,
     get_watchlist_intraday_snapshot,
+    _compute_resistance_facts,
+    _round_figure_unit,
 )
+
+
+def test_round_figure_unit_scales_by_price_tier():
+    from market_intelligence.stock import _round_figure_unit
+
+    assert _round_figure_unit(5_000) == 1_000
+    assert _round_figure_unit(9_999) == 1_000
+    assert _round_figure_unit(10_000) == 5_000       # boundary: "1만원 미만"만 1,000원대
+    assert _round_figure_unit(50_000) == 5_000
+    assert _round_figure_unit(100_000) == 10_000      # boundary
+    assert _round_figure_unit(500_000) == 10_000
+    assert _round_figure_unit(1_000_000) == 100_000   # boundary
+    assert _round_figure_unit(2_500_000) == 100_000
+
+
+def _candle(open_, high, low, close, trading_value=1_000_000_000.0):
+    return {"open": open_, "high": high, "low": low, "close": close,
+            "volume": 1000, "trading_value": trading_value}
+
+
+def test_compute_resistance_facts_detects_20d_high_breakout():
+    from market_intelligence.stock import _compute_resistance_facts
+
+    prior = [_candle(90_000, 95_000, 89_000, 94_000) for _ in range(19)]
+    prior.append(_candle(94_000, 100_000, 93_000, 99_000))  # 20th prior day, highest high
+    today = _candle(99_000, 101_000, 98_500, 100_500)
+    candles = prior + [today]
+
+    facts = _compute_resistance_facts(candles, current_price=101_000.0)
+
+    assert facts["resistance_20d_high"] == 100_000.0
+    assert facts["is_breakout_20d_high"] is True
+    assert facts["pct_from_resistance"] == 1.0
+
+
+def test_compute_resistance_facts_no_breakout_when_below_resistance():
+    from market_intelligence.stock import _compute_resistance_facts
+
+    prior = [_candle(90_000, 95_000, 89_000, 94_000) for _ in range(20)]
+    today = _candle(94_000, 94_500, 93_000, 94_200)
+    candles = prior + [today]
+
+    facts = _compute_resistance_facts(candles, current_price=94_200.0)
+
+    assert facts["resistance_20d_high"] == 95_000.0
+    assert facts["is_breakout_20d_high"] is False
+
+
+def test_compute_resistance_facts_detects_round_figure_breakout():
+    from market_intelligence.stock import _compute_resistance_facts
+
+    prior = [_candle(28_000, 29_000, 27_500, 28_500) for _ in range(20)]
+    today = _candle(29_500, 31_000, 29_200, 30_800)  # 시가 29,500 < 라운드(30,000) <= 현재가
+    candles = prior + [today]
+
+    facts = _compute_resistance_facts(candles, current_price=30_800.0)
+
+    assert facts["round_figure_price"] == 30_000.0
+    assert facts["is_breakout_round_figure"] is True
+
+
+def test_compute_resistance_facts_no_round_figure_breakout_when_open_already_above():
+    from market_intelligence.stock import _compute_resistance_facts
+
+    prior = [_candle(28_000, 29_000, 27_500, 28_500) for _ in range(20)]
+    today = _candle(30_500, 31_000, 30_200, 30_800)  # 시가부터 이미 30,000 위 — "돌파"가 아님
+
+    facts = _compute_resistance_facts(prior + [today], current_price=30_800.0)
+
+    assert facts["is_breakout_round_figure"] is False
+
+
+def test_compute_resistance_facts_volume_ratio_uses_prior_5_day_average():
+    from market_intelligence.stock import _compute_resistance_facts
+
+    prior = [_candle(90_000, 95_000, 89_000, 94_000, trading_value=1_000_000_000.0) for _ in range(20)]
+    today = _candle(94_000, 96_000, 93_500, 95_500, trading_value=3_000_000_000.0)
+
+    facts = _compute_resistance_facts(prior + [today], current_price=95_500.0)
+
+    assert facts["volume_vs_5d_avg_ratio"] == 3.0
+
+
+def test_compute_resistance_facts_handles_empty_candles():
+    from market_intelligence.stock import _compute_resistance_facts
+
+    facts = _compute_resistance_facts([], current_price=0.0)
+
+    assert facts["resistance_20d_high"] == 0.0
+    assert facts["is_breakout_20d_high"] is False
+    assert facts["is_breakout_round_figure"] is False
+    assert facts["volume_vs_5d_avg_ratio"] == 0.0
 
 
 class StubKisApi:
@@ -486,6 +580,55 @@ def test_get_watchlist_intraday_snapshot_bundles_price_news_and_status(monkeypat
     assert result["tickers"][0]["intraday_trend"] == "up"
     assert "headline_count" not in result["tickers"][0]
     assert "latest_headlines" not in result["tickers"][0]
+
+
+def test_get_watchlist_intraday_snapshot_includes_resistance_facts(monkeypatch):
+    import market_intelligence.stock as mil_stock
+    import market_intelligence.risk_filter as mil_risk_filter
+
+    monkeypatch.setattr(mil_stock, "get_recent_news", lambda ticker="", hours=2: [])
+    monkeypatch.setattr(
+        mil_risk_filter,
+        "get_stock_status",
+        lambda ctx, phase, ticker: {"ticker": ticker, "is_limit_up": False, "is_limit_down": False, "is_vi": False,
+                                    "trading_halted": False, "administrative_issue": False},
+    )
+
+    class FakeNaver:
+        def search(self, query, display=5):
+            return []
+
+    monkeypatch.setattr(mil_stock, "NaverNewsFetcher", FakeNaver)
+
+    ctx = make_ctx(
+        raw_responses={
+            "FHKST11300006": {
+                "output": [{"inter_shrn_iscd": "000660", "inter2_prpr": "101000", "prdy_ctrt": "5.0", "acml_vol": "200"}],
+            },
+            "FHKST03010200": {"output2": []},
+            "FHKST01011800": {"output": []},
+            "FHKST03010100": {
+                "output1": {"stck_prpr": "101000"},
+                "output2": (
+                    [{"stck_bsop_date": f"2026060{i}", "stck_oprc": "90000", "stck_hgpr": "95000",
+                      "stck_lwpr": "89000", "stck_clpr": "94000", "acml_vol": "100000",
+                      "acml_tr_pbmn": "1000000000"} for i in range(1, 10)]
+                    + [{"stck_bsop_date": "20260620", "stck_oprc": "94000", "stck_hgpr": "100000",
+                        "stck_lwpr": "93000", "stck_clpr": "99000", "acml_vol": "100000",
+                        "acml_tr_pbmn": "1000000000"}]
+                    + [{"stck_bsop_date": "20260703", "stck_oprc": "99000", "stck_hgpr": "101500",
+                        "stck_lwpr": "98500", "stck_clpr": "101000", "acml_vol": "100000",
+                        "acml_tr_pbmn": "1000000000"}]  # 당일(미마감) 봉 — 마지막
+                ),
+            },
+        },
+    )
+
+    result = get_watchlist_intraday_snapshot(ctx, "INTRADAY", tickers=["000660"])
+
+    resistance = result["tickers"][0]["resistance"]
+    assert resistance["resistance_20d_high"] == 100_000.0
+    assert resistance["is_breakout_20d_high"] is True
 
 
 def test_get_watchlist_intraday_snapshot_uses_hts_avls_for_market_cap(monkeypatch):

@@ -435,13 +435,20 @@ def test_intraday_prompt_mentions_recompare_within_same_theme_subtheme():
     assert "우선순위에서 제외하라" in text
 
 
+def test_scan_prompt_describes_resistance_breakout_setup():
+    text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
+    assert "RESISTANCE_BREAKOUT" in text
+    assert "facts.resistance" in text
+    assert "risk_off_mode일 때 이 셋업으로 신규 등재 금지" in text
+
+
 def test_v3_reversal_prompts_use_single_reversal_tactic_name():
     scan_text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
     intraday_text = Path("prompts/agents/trading_agent/intraday.md").read_text(encoding="utf-8")
 
     assert "REVERSAL_BOTTOM" not in scan_text
     assert "REVERSAL_BOTTOM" not in intraday_text
-    assert '"setup": "VOLUME_SURGE_LEADER|THEME_CATALYST|REVERSAL"' in scan_text
+    assert '"setup": "VOLUME_SURGE_LEADER|THEME_CATALYST|REVERSAL|RESISTANCE_BREAKOUT"' in scan_text
     assert "REVERSAL" in intraday_text
     assert '"next_action": "final"' in intraday_text
 
@@ -731,3 +738,10 @@ def test_run_degrades_to_no_trade_on_persistent_invalid_json():
     assert result["action"] == "NO_TRADE"
     assert "llm_invalid_json" in result["reason"]
     assert agent._llm.calls == 2  # 1회 재시도 후 강등
+
+
+def test_intraday_prompt_describes_resistance_breakout_entry_and_exit():
+    text = Path("prompts/agents/trading_agent/intraday.md").read_text(encoding="utf-8")
+    assert "RESISTANCE_BREAKOUT" in text
+    assert "resistance_breakout_allowed" in text
+    assert "RESISTANCE_BREAKOUT_ENTRY" in text
