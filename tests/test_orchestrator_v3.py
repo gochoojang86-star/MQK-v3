@@ -2681,3 +2681,70 @@ def test_run_premarket_early_v3_reconciles_first(tmp_path, monkeypatch):
     orch.run_premarket_early_v3()
 
     assert calls == ["reconcile"]
+
+
+def test_prefetch_pool_resistance_bounds_to_top_15(monkeypatch, tmp_path):
+    import market_intelligence.stock as mil_stock
+
+    calls = []
+
+    def fake_get_ohlcv(ctx, phase, ticker, period=60):
+        calls.append(ticker)
+        return {
+            "current_price": 100_000.0,
+            "candles": [{"open": 90_000, "high": 95_000, "low": 89_000, "close": 94_000,
+                         "trading_value": 1_000_000_000.0} for _ in range(20)]
+                       + [{"open": 94_000, "high": 101_000, "low": 93_500, "close": 100_500,
+                           "trading_value": 1_000_000_000.0}],
+        }
+
+    monkeypatch.setattr(mil_stock, "get_ohlcv", fake_get_ohlcv)
+
+    orch = make_orchestrator(tmp_path)
+    pool = [{"ticker": f"{i:06d}", "facts": {}} for i in range(20)]
+
+    orch._prefetch_pool_resistance(pool)
+
+    assert len(calls) == 15
+    assert "resistance" in pool[0]["facts"]
+    assert pool[0]["facts"]["resistance"]["is_breakout_20d_high"] is True
+    assert "resistance" not in pool[15]["facts"]
+
+
+def test_prefetch_pool_resistance_skips_ticker_on_fetch_failure(monkeypatch, tmp_path):
+    import market_intelligence.stock as mil_stock
+
+    monkeypatch.setattr(mil_stock, "get_ohlcv", lambda ctx, phase, ticker, period=60: (_ for _ in ()).throw(RuntimeError("api down")))
+
+    orch = make_orchestrator(tmp_path)
+    pool = [{"ticker": "005930", "facts": {}}]
+
+    orch._prefetch_pool_resistance(pool)  # 예외 전파 없이 조용히 스킵돼야 함
+
+    assert "resistance" not in pool[0]["facts"]
+
+
+def test_run_scan_v3_calls_prefetch_pool_resistance(monkeypatch, tmp_path):
+    orch = make_orchestrator(tmp_path)
+    calls = []
+    orch._prefetch_pool_resistance = lambda pool, top_n=None: calls.append("resistance")
+    orch._prefetch_pool_news = lambda pool, top_n=None: calls.append("news")
+    orch._build_scan_candidate_pool = lambda regime=None: []
+    orch._build_scan_market_story_brief = lambda: {}
+    orch._build_context = lambda *a, **k: {"candidate_pool": []}
+    orch._trading_agent = FakeTradingAgent({
+        "next_action": "final", "action": "WAIT", "watchlist": [], "candidates": [], "reason": "",
+    })
+    orch._record_tool_request = lambda *a, **k: None
+    orch._alert_on_tool_failures = lambda *a, **k: None
+    orch._save_json = lambda *a, **k: None
+    orch._apply_scan_diversity_guard = lambda result, context: result
+    orch._watchlist_entries_from_scan_result = lambda result: []
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    orch.run_scan_v3()
+
+    assert calls == ["news", "resistance"]

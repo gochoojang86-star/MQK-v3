@@ -46,6 +46,7 @@ from market_intelligence import theme as mil_theme
 from market_intelligence.base import MILContext, ToolFailure
 from market_intelligence.cache import MILCache
 from market_intelligence.circuit_breaker import CircuitBreaker
+from market_intelligence.stock import _compute_resistance_facts
 
 logger = logging.getLogger("mqk_v3")
 
@@ -665,6 +666,7 @@ class MQKOrchestratorV3:
         # 종목 뉴스 사전 주입 — pool 상위 우선순위 구간 종목의 뉴스를 코드가 수집해 facts에 embed.
         # LLM이 get_news_stock을 건너뛰더라도 촉매 판단 근거가 context에 이미 존재한다.
         self._prefetch_pool_news(context["candidate_pool"])
+        self._prefetch_pool_resistance(context["candidate_pool"])
 
         result = self._trading_agent.run(TradingPhase.SCAN, context)
         self._record_tool_request(result, TradingPhase.SCAN, regime)
@@ -1531,6 +1533,27 @@ class MQKOrchestratorV3:
                 }
             except Exception as e:
                 logger.debug(f"[SCAN POOL NEWS] {ticker} 뉴스 수집 실패 (스킵): {e}")
+
+    def _prefetch_pool_resistance(self, pool: list[dict], top_n: int | None = None) -> None:
+        """pool 상위 우선순위 구간 종목의 저항선/라운드피겨 fact를 코드가 미리 계산해 embed한다.
+
+        get_ohlcv 실패는 해당 종목만 스킵 (전체 SCAN 중단 없음). _prefetch_pool_news와
+        동일한 비용 상한 패턴 — 상위 top_n개만 조회.
+        """
+        phase = TradingPhase.SCAN.value
+        if top_n is None:
+            top_n = min(len(pool), 15)
+        for item in pool[:top_n]:
+            ticker = item.get("ticker", "")
+            if not ticker:
+                continue
+            try:
+                ohlcv = mil_stock.get_ohlcv(self._mil, phase, ticker, period=25)
+                item["facts"]["resistance"] = _compute_resistance_facts(
+                    ohlcv.get("candles", []), ohlcv.get("current_price", 0.0)
+                )
+            except Exception as e:
+                logger.debug(f"[SCAN POOL RESISTANCE] {ticker} 저항선 계산 실패 (스킵): {e}")
 
     # ── 컨텍스트/스냅샷 빌더 ───────────────────────────────────────────────────
 
