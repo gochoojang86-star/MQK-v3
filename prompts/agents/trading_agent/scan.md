@@ -5,6 +5,7 @@
 1. **VOLUME_SURGE_LEADER**: 당일 거래대금 5배↑ + 10%↑ 강한 양봉 + 테마 내 거래대금 1위
 2. **THEME_CATALYST**: 강한 뉴스 촉매 + 테마 내 거래대금 1위 + 당일 5%↑
 3. **REVERSAL**: 폭락일(지수 -3%↓) + 본류 대장주 당일 낙폭 -5%↑ + 패닉셀 거래대금 폭증 → 저점 반등 후보
+4. **RESISTANCE_BREAKOUT**: 본류 대장주가 최근 20일 고점 또는 라운드 피겨(가격대별 자동 단위)를 상향 돌파 + 거래대금 5일 평균 대비 2배 이상
 
 2등주는 쓰레기다. 오늘 시장에서 돈이 붙는 **스토리 클러스터** 안에서 거래대금 1위만 논한다.
 - **"거래대금 1위"는 시총 순위가 아니라 오늘 그 좁은 스토리 클러스터 안에서의 거래대금이다.**
@@ -191,6 +192,18 @@
 - **가짜 하락**: `change_pct > -5%` or 거래대금 2배 미만 → 일반 조정, 등재 금지
 - **절대 금지**: d20 이격도나 스팩/ETF로 탐색하지 말 것 — 당일 낙폭·거래대금이 유일한 기준
 
+## RESISTANCE_BREAKOUT 판별 기준
+- **대상**: `role=본류 대장주`만. 후발주 돌파는 대상 아님.
+- pool 상위 종목에는 `facts.resistance`가 코드로 미리 계산되어 있다 — 직접 계산하지 말고 이 값을 읽어라:
+  - `is_breakout_20d_high`: 최근 20일 고점 상향 돌파 여부
+  - `is_breakout_round_figure`: 당일 시가 아래에 있던 라운드 피겨(`round_figure_price`)를 상향 돌파했는지
+  - `volume_vs_5d_avg_ratio`: 오늘 거래대금 ÷ 최근 5일 평균
+- **조건 1 (필수)**: `is_breakout_20d_high` 또는 `is_breakout_round_figure` 중 하나 이상 `true`
+- **조건 2 (필수)**: `volume_vs_5d_avg_ratio ≥ 2.0`
+- **confidence 가산**: 둘 다 `true`(20일 고점 + 라운드 피겨 동시 돌파)면 `theme_evidence`에 "동시 돌파" 명시하고 confidence를 더 줄 수 있다.
+- **risk_off_mode일 때 이 셋업으로 신규 등재 금지** — 폭락장의 개별 종목 돌파는 가짜 돌파일 확률이 높다.
+- `facts.resistance`가 없는 종목(top 15 밖이라 프리페치 안 됨)은 이 셋업으로 등재하지 말 것 — 직접 계산해서 추정하지 마라.
+
 ## final 전 체크리스트
 
 final을 내기 전에 아래 세 항목을 확인하라. 하나라도 No면 해당 도구를 먼저 호출한 뒤 final을 내라.
@@ -214,7 +227,7 @@ final을 내기 전에 아래 세 항목을 확인하라. 하나라도 No면 해
   "candidates": [
     {
       "ticker": "000660",
-      "setup": "VOLUME_SURGE_LEADER|THEME_CATALYST|REVERSAL",
+      "setup": "VOLUME_SURGE_LEADER|THEME_CATALYST|REVERSAL|RESISTANCE_BREAKOUT",
       "confidence": 85,
       "theme": "반도체",
       "subtheme": "HBM",
@@ -250,3 +263,6 @@ final을 내기 전에 아래 세 항목을 확인하라. 하나라도 No면 해
 - **REVERSAL**: 처음 보는 소형주·테마 비주류 금지 — 전 대장주만
 - **REVERSAL**: `get_disparity_rank`(d20 이격도)로 탐색 금지 — `trading_value_top`의 `change_pct <= -5%`가 유일한 진입점
 - **REVERSAL**: 오늘 거래대금이 5일 평균 2배 미만이면 등재 금지
+- **RESISTANCE_BREAKOUT**: `facts.resistance.is_breakout_20d_high`도 `is_breakout_round_figure`도 `false`인데 등재 금지
+- **RESISTANCE_BREAKOUT**: `volume_vs_5d_avg_ratio < 2.0`인데 등재 금지
+- **RESISTANCE_BREAKOUT**: risk_off_mode에서 신규 등재 금지
