@@ -154,13 +154,24 @@ class LLMClient:
             # call_tool JSON 두 개를 한 응답에 반환해 phase 전체가 죽은 사례).
             try:
                 obj, end = json.JSONDecoder().raw_decode(raw)
-                logger.warning(
-                    f"LLM 응답에 여분 데이터 — 첫 JSON 오브젝트만 사용 "
-                    f"(전체 {len(raw)}자 중 {end}자, 모델={self._cfg.model_for(tier)})"
-                )
-                return obj
             except json.JSONDecodeError:
                 pass
+            else:
+                # 첫 오브젝트가 next_action/action 둘 다 없는 빈 껍데기면 진짜 답이 아니라
+                # 응답이 중간에 끊긴 조각일 가능성이 높다 (예: {"next_action": null}만 41자
+                # 파싱되고 나머지 3000여 자가 버려짐). 이런 경우 그대로 받아들이면 하위
+                # trading_agent.py가 unknown_next_action으로 오인해 NO_TRADE로 조용히
+                # 강등시킨다 — 재시도를 유도하도록 무효 처리한다.
+                if isinstance(obj, dict) and (obj.get("next_action") or obj.get("action")):
+                    logger.warning(
+                        f"LLM 응답에 여분 데이터 — 첫 JSON 오브젝트만 사용 "
+                        f"(전체 {len(raw)}자 중 {end}자, 모델={self._cfg.model_for(tier)})"
+                    )
+                    return obj
+                logger.warning(
+                    f"LLM 응답 첫 JSON 오브젝트에 next_action/action이 없어 폐기 "
+                    f"(전체 {len(raw)}자 중 {end}자, 모델={self._cfg.model_for(tier)})"
+                )
             raise ValueError(
                 f"LLM이 유효한 JSON을 반환하지 않았습니다. "
                 f"모델={self._cfg.model_for(tier)}, 오류={e}, "

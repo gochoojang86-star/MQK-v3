@@ -57,6 +57,26 @@ def test_call_raises_on_totally_invalid_json(tmp_path):
         c.call("sys", "user")
 
 
+def test_call_rejects_empty_leading_fragment_with_trailing_extra_data(tmp_path):
+    """2026-07-03 13:17 SCAN 회귀: 첫 오브젝트가 next_action/action 둘 다 없는
+    빈 껍데기(예: {"next_action": null})면 뒤에 진짜 답이 남아있어도 그걸 정상
+    응답으로 오인해 반환하면 안 되고, 재시도가 유도되도록 실패해야 한다."""
+    content = '{"next_action": null}' + json.dumps(
+        {"next_action": "final", "action": "WATCHLIST_UPDATE", "watchlist": ["005930"]}
+    )
+    c = _client_with_response(content, tmp_path)
+    with pytest.raises(ValueError):
+        c.call("sys", "user")
+
+
+def test_call_accepts_short_first_object_with_action_only(tmp_path):
+    """next_action 없이 action만 있는 경우(신형 모델)도 여전히 유효한 폴백 대상이다."""
+    content = '{"action": "NO_TRADE"}' + json.dumps({"junk": "trailing"})
+    c = _client_with_response(content, tmp_path)
+    result = c.call("sys", "user")
+    assert result == {"action": "NO_TRADE"}
+
+
 def test_openrouter_client_builds_sdk_with_base_url_and_headers(monkeypatch):
     captured = {}
 
