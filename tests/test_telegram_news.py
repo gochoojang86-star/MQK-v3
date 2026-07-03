@@ -51,3 +51,38 @@ def test_name_map_excludes_pref_etf_etn_spac(tmp_path, monkeypatch):
     names = {n for n, _ in pairs}
     assert names == {"삼성전자", "에코글로우", "성우"}
 
+
+def test_fetch_url_summary_prefers_meta_description(monkeypatch):
+    class Resp:
+        text = """
+        <html><head>
+        <meta property="og:description" content="마키나락스가 국방 AI 플랫폼 고도화를 위해 신규 협력을 논의 중이다.">
+        </head><body></body></html>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(tn.requests, "get", lambda *args, **kwargs: Resp())
+    summary = tn._fetch_url_summary("https://example.com/article")
+    assert "마키나락스" in summary
+    assert "국방 AI 플랫폼" in summary
+
+
+def test_fetch_url_summary_falls_back_to_paragraphs(monkeypatch):
+    class Resp:
+        text = """
+        <html><body><article>
+        <p>짧음</p>
+        <p>마키나락스는 제조 AI 소프트웨어 사업을 확대하며 신규 고객사 확보에 속도를 내고 있다.</p>
+        <p>회사는 이번 분기 안에 국방 분야 파일럿 프로젝트를 시작할 계획이라고 밝혔다.</p>
+        </article></body></html>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(tn.requests, "get", lambda *args, **kwargs: Resp())
+    summary = tn._fetch_url_summary("https://example.com/article")
+    assert "제조 AI 소프트웨어" in summary
+    assert "국방 분야 파일럿 프로젝트" in summary

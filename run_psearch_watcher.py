@@ -58,7 +58,7 @@ def main() -> None:
     from codes.psearch_watcher import (
         format_alert, fresh_cache, load_seen, partition_entries, poll_new_entries, save_seen,
     )
-    from orchestrator_v3 import MQKOrchestratorV3, load_watchlist, save_watchlist
+    from orchestrator_v3 import MQKOrchestratorV3, load_watchlist_entries, save_watchlist
 
     orch = MQKOrchestratorV3(kis_api=KISApi())
     hts_id = os.environ.get("KIS_HTS_ID", "")
@@ -80,10 +80,15 @@ def main() -> None:
                 else:
                     try:
                         if merge_tickers:
-                            wl = load_watchlist()
-                            merged = wl + [t for t in merge_tickers if t not in wl]
-                            save_watchlist(merged)
-                            logger.info(f"[psearch_watcher] watchlist 병합: +{merge_tickers} → {merged}")
+                            wl = load_watchlist_entries()
+                            existing_tickers = {e["ticker"] for e in wl}
+                            new_entries = [
+                                {"ticker": t, "setup": "THEME_CATALYST", "reason": "psearch_watcher 조건검색 편입", "confidence": 70}
+                                for t in merge_tickers if t not in existing_tickers
+                            ]
+                            if new_entries:
+                                save_watchlist(wl + new_entries)
+                                logger.info(f"[psearch_watcher] watchlist 병합: +{merge_tickers} → {[e['ticker'] for e in wl + new_entries]}")
                         save_seen(seen)
                         try:
                             orch._telegram.notify(format_alert(events))

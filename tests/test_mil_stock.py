@@ -188,15 +188,22 @@ def _patch_news_sources(monkeypatch, telegram=None, naver=None):
 
 
 def test_get_news_stock_filters_by_ticker(monkeypatch):
-    _patch_news_sources(monkeypatch)
-    ctx = make_ctx(
-        raw_responses={
-            "FHKST01011800": {
-                "output": [
-                    {"hts_pbnt_titl_cntt": "삼성전자 신규 수주", "data_dt": "20260609", "data_tm": "100000"},
-                ],
-            },
-        },
+    from codes.news_fetcher import NewsItem
+    _patch_news_sources(
+        monkeypatch,
+        naver=[NewsItem(title="삼성전자 신규 수주", description="AI 칩 공급 계약",
+                        url="https://n.news", pub_date="2026-06-09", source="naver")],
+    )
+
+    class SnapshotKis(StubKisApi):
+        def get_snapshot(self, ticker):
+            return {"name": "삼성전자"}
+
+    from market_intelligence.cache import MILCache
+    from market_intelligence.circuit_breaker import CircuitBreaker
+    ctx = MILContext(
+        kis_api=SnapshotKis(raw_responses={}),
+        cache=MILCache(), circuit_breaker=CircuitBreaker(),
     )
     result = get_news_stock(ctx, "SCAN", ticker="005930")
     assert result["headlines"][0]["title"] == "삼성전자 신규 수주"
@@ -313,8 +320,9 @@ def test_get_news_stock_merges_telegram_and_naver(monkeypatch):
     from codes.news_fetcher import NewsItem
     _patch_news_sources(
         monkeypatch,
-        telegram=[{"title": "삼성전자 대규모 수주", "sentiment": "positive",
-                    "score": 0.8, "source": "FastStockNews", "date": "2026-06-12T10:00:00"}],
+        telegram=[{"title": "삼성전자 대규모 수주", "content": "AI 칩 공급 계약 논의",
+                    "sentiment": "positive", "score": 0.8, "source": "FastStockNews",
+                    "date": "2026-06-12T10:00:00"}],
         naver=[NewsItem(title="삼성전자, 세계 최초 공정 발표", description="2나노 양산" * 30,
                          url="https://n.news", pub_date="Fri, 12 Jun 2026", source="naver")],
     )
@@ -331,11 +339,50 @@ def test_get_news_stock_merges_telegram_and_naver(monkeypatch):
     )
     result = get_news_stock(ctx, "SCAN", ticker="005930")
 
+    assert result["telegram_headlines"][0]["summary"] == "AI 칩 공급 계약 논의"
+    assert result["headlines"][0]["title"].startswith("삼성전자")
     assert result["telegram_headlines"][0]["title"] == "삼성전자 대규모 수주"
     assert result["naver_headlines"][0]["title"].startswith("삼성전자")
     assert len(result["naver_headlines"][0]["summary"]) <= 120
     assert "missing_fields" not in result
 
+
+def test_get_news_stock_deprioritizes_low_signal_naver_articles(monkeypatch):
+    from codes.news_fetcher import NewsItem
+    _patch_news_sources(
+        monkeypatch,
+        naver=[
+            NewsItem(
+                title="마키나락스 주가, 7월 3일 장중 24,000원 12.68% 상승",
+                description="장중 주가 설명 기사",
+                url="https://a",
+                pub_date="Fri, 03 Jul 2026",
+                source="naver",
+            ),
+            NewsItem(
+                title="'피지컬 AI 열풍' 스타트업에도 뭉칫돈",
+                description="마키나락스는 제조·국방 특화 AI 기업으로 누적 투자와 사업 확장을 이어가고 있다.",
+                url="https://b",
+                pub_date="Fri, 03 Jul 2026",
+                source="naver",
+            ),
+        ],
+    )
+
+    class SnapshotKis(StubKisApi):
+        def get_snapshot(self, ticker):
+            return {"name": "마키나락스"}
+
+    from market_intelligence.cache import MILCache
+    from market_intelligence.circuit_breaker import CircuitBreaker
+    ctx = MILContext(
+        kis_api=SnapshotKis(raw_responses={}),
+        cache=MILCache(), circuit_breaker=CircuitBreaker(),
+    )
+    result = get_news_stock(ctx, "SCAN", ticker="477850")
+
+    assert result["naver_headlines"][0]["title"].startswith("'피지컬 AI 열풍'")
+    assert result["naver_headlines"][1]["title"].startswith("마키나락스 주가")
 
 def test_get_news_stock_isolates_source_failures(monkeypatch):
     import market_intelligence.stock as mil_stock
@@ -351,11 +398,19 @@ def test_get_news_stock_isolates_source_failures(monkeypatch):
 
     monkeypatch.setattr(mil_stock, "NaverNewsFetcher", BoomNaver)
 
-    ctx = make_ctx(raw_responses={"FHKST01011800": {"output": [
-        {"hts_pbnt_titl_cntt": "KIS 뉴스", "data_dt": "20260612", "data_tm": "100000"}]}})
+    class SnapshotKis(StubKisApi):
+        def get_snapshot(self, ticker):
+            return {"name": "삼성전자"}
+
+    from market_intelligence.cache import MILCache
+    from market_intelligence.circuit_breaker import CircuitBreaker
+    ctx = MILContext(
+        kis_api=SnapshotKis(raw_responses={}),
+        cache=MILCache(), circuit_breaker=CircuitBreaker(),
+    )
     result = get_news_stock(ctx, "SCAN", ticker="005930")
 
-    assert result["headlines"][0]["title"] == "KIS 뉴스"  # KIS는 정상
+    assert result["headlines"] == []
     assert result["telegram_headlines"] == []
     assert result["naver_headlines"] == []
     assert set(result["missing_fields"]) == {"telegram_headlines", "naver_headlines"}

@@ -11,6 +11,37 @@ from broker.telegram_news import get_recent_news, search_recent_news
 from codes.news_fetcher import NaverNewsFetcher
 from market_intelligence.base import MILContext, ToolFailure
 
+_NAVER_LOW_SIGNAL_PATTERNS = (
+    "주가,",
+    "주가 ",
+    "장중",
+    "상승률 상위",
+    "하락률 상위",
+    "상한가",
+    "하한가",
+    "증시 풍향계",
+    "강세... 왜?",
+    "강세…왜?",
+    "급등",
+)
+
+
+def _is_low_signal_naver_article(title: str, summary: str) -> bool:
+    haystack = f"{title} {summary}".strip().lower()
+    return any(pattern.lower() in haystack for pattern in _NAVER_LOW_SIGNAL_PATTERNS)
+
+
+def _rank_naver_articles(items: list) -> list:
+    def key(item) -> tuple[int, str]:
+        title = str(getattr(item, "title", "") or "")
+        summary = str(getattr(item, "description", "") or "")
+        return (
+            1 if _is_low_signal_naver_article(title, summary) else 0,
+            title,
+        )
+
+    return sorted(items, key=key)
+
 
 def get_ohlcv(ctx: MILContext, phase: str, ticker: str, period: int = 60) -> dict:
     """국내주식기간별시세. output1=현재가/호가/밸류에이션, output2=OHLCV+권리락코드."""
@@ -233,9 +264,10 @@ def get_flow(ctx: MILContext, phase: str, ticker: str) -> dict:
 
 
 def get_news_stock(ctx: MILContext, phase: str, ticker: str) -> dict:
-    """ticker 필터 뉴스 3종 통합: KIS 공시/시황 + 텔레그램 속보 + 네이버 뉴스 검색.
+    """ticker 필터 뉴스 2종 통합: 텔레그램 속보 + 네이버 뉴스 검색.
 
-    텔레그램(최근 2시간)은 속보성, 네이버(종목명 검색)는 촉매 맥락 보강용.
+    텔레그램(최근 2시간)은 속보성, 네이버(종목명 검색)는 summary 중심의 촉매 맥락
+    보강용이다. KIS 뉴스는 종목 직접성보다 랭킹/시황 잡음이 많아 제외한다.
     각 소스는 개별 격리 — 실패는 missing_fields에 기록하고 0건으로 해석하지 않는다.
     """
 
@@ -243,34 +275,16 @@ def get_news_stock(ctx: MILContext, phase: str, ticker: str) -> dict:
         result: dict = {"ticker": ticker}
         missing: list[str] = []
 
-        raw = ctx.kis_api.raw_get(
-            "FHKST01011800",
-            "domestic-stock/v1/quotations/news-title",
-            {
-                "FID_NEWS_OFER_ENTP_CODE": "",
-                "FID_COND_MRKT_CLS_CODE": "",
-                "FID_INPUT_ISCD": ticker,
-                "FID_TITL_CNTT": "",
-                "FID_INPUT_DATE_1": "",
-                "FID_INPUT_HOUR_1": "",
-                "FID_RANK_SORT_CLS_CODE": "",
-                "FID_INPUT_SRNO": "",
-            },
-        )
-        result["headlines"] = [
-            {
-                "title": row.get("hts_pbnt_titl_cntt"),
-                "date": row.get("data_dt"),
-                "time": row.get("data_tm"),
-            }
-            for row in raw.get("output", [])
-        ]
-
         # 텔레그램 속보 (수집기 mqk-telegram-news가 sqlite에 적재)
         try:
             result["telegram_headlines"] = [
-                {"title": n.get("title"), "sentiment": n.get("sentiment"),
-                 "source": n.get("source"), "date": n.get("date")}
+                {
+                    "title": n.get("title"),
+                    "summary": str(n.get("content") or "")[:240],
+                    "sentiment": n.get("sentiment"),
+                    "source": n.get("source"),
+                    "date": n.get("date"),
+                }
                 for n in get_recent_news(ticker=ticker, hours=2)[:10]
             ]
         except Exception:
@@ -285,16 +299,20 @@ def get_news_stock(ctx: MILContext, phase: str, ticker: str) -> dict:
             except Exception:
                 pass
             if stock_name:
-                items = NaverNewsFetcher().search(stock_name, display=5)
+                items = _rank_naver_articles(NaverNewsFetcher().search(stock_name, display=8))
                 result["naver_headlines"] = [
                     {"title": n.title, "summary": n.description[:120],
                      "date": n.pub_date, "url": n.url}
-                    for n in items
+                    for n in items[:5]
                 ]
+                # generic headlines는 now 네이버 summary 중심 결과를 alias한다.
+                result["headlines"] = result["naver_headlines"]
             else:
+                result["headlines"] = []
                 result["naver_headlines"] = []
                 missing.append("naver_headlines")
         except Exception:
+            result["headlines"] = []
             result["naver_headlines"] = []
             missing.append("naver_headlines")
 

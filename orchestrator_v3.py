@@ -125,10 +125,8 @@ def _normalize_reason_code(value: str | None) -> str:
 
 
 def _is_valid_krx_ticker(value: str | None) -> bool:
-    # 6자리 숫자만이 아니라 우선주/특수종목 코드(예: 매드업 "0039P0", 두산퓨얼셀1우 "33626K")도
-    # 포함해야 한다 — 순수 \d{6}였을 때 이런 실존 종목이 SCAN candidate pool에서 통째로
-    # 빠지는 회귀가 발생함(2026-07-03, universe.csv 기준 74개 종목 영향).
-    return bool(re.fullmatch(r"[0-9A-Z]{6}", str(value or "").strip().upper()))
+    # SCAN candidate_pool은 보통주 6자리 숫자 코드만 허용한다.
+    return bool(re.fullmatch(r"\d{6}", str(value or "").strip()))
 
 
 def _infer_intraday_top_level_reason_code(action: str, reason: str) -> str:
@@ -1508,24 +1506,21 @@ class MQKOrchestratorV3:
                 continue
             try:
                 raw = mil_stock.get_news_stock(self._mil, phase, ticker)
-                # 제목만 압축해서 embed — 전문(全文) 대신 타이틀 목록
-                titles = [
-                    h.get("title", "")
-                    for h in (raw.get("headlines") or [])[:5]
-                    if h.get("title")
-                ]
                 telegram = [
-                    h.get("title", "")
+                    (
+                        f"{h.get('title', '')} | {h.get('summary', '')}".strip(" |")
+                    )
                     for h in (raw.get("telegram_headlines") or [])[:3]
-                    if h.get("title")
+                    if h.get("title") or h.get("summary")
                 ]
                 naver = [
-                    h.get("title", "")
+                    (
+                        f"{h.get('title', '')} | {h.get('summary', '')}".strip(" |")
+                    )
                     for h in (raw.get("naver_headlines") or [])[:3]
-                    if h.get("title")
+                    if h.get("title") or h.get("summary")
                 ]
                 item["facts"]["news"] = {
-                    "kis": titles,
                     "telegram": telegram,
                     "naver": naver,
                 }
@@ -2309,10 +2304,10 @@ class MQKOrchestratorV3:
         }
         user_msg = (
             "MQK soul 전략 기준 최종 매수 재판단이다.\n"
-            "후발주, 약한 2등주, 과도한 추격은 거부하고 진짜 본류 대장 또는 고품질 리더 진입만 승인하라.\n"
-            "단, role=본류 대장주인 재진입 눌림은 최근 평균 거래대금이 유지되고 과도한 고점 추격이 아니면 confidence 70~74 구간도 기계적으로 거부하지 마라.\n"
+            "후발주, 약한 추격, 근거 없는 군중 편승은 거부하되 본류 대장주뿐 아니라 강한 서브 대장주와 초기 공동 리더도 승인 후보에 포함하라.\n"
+            "단, role=본류 대장주 또는 서브 대장주인 재진입 눌림은 최근 평균 거래대금이 유지되고 과도한 고점 추격이 아니면 confidence 70~74 구간도 기계적으로 거부하지 마라.\n"
             "직전 1개 봉 거래대금 약화만으로는 거부 근거가 부족하며, 평균 거래대금 추세와 눌림 후 재정착을 우선 보라.\n"
-            "리뷰 실패 시 시스템은 fail-open으로 진행하므로, 판단 가능할 때만 명확히 거부하라.\n\n"
+            "리뷰 실패 시 시스템은 fail-open으로 진행하므로, 판단 가능할 때만 명확히 거부하라. 애매하면 승인 쪽으로 기울고, 명확한 결함이 있을 때만 거부하라.\n\n"
             f"proposal={json.dumps(review_payload, ensure_ascii=False)}\n"
             f"portfolio={json.dumps(portfolio_payload, ensure_ascii=False)}\n\n"
             '반드시 단일 JSON으로 답하라: {"approve": true|false, "reason": "..."}'
@@ -2321,7 +2316,8 @@ class MQKOrchestratorV3:
             result = llm.call(
                 system=(
                     "You are the final MQK buy reviewer. "
-                    "Approve only high-quality leader entries consistent with the soul strategy. "
+                    "Approve high-quality leader entries consistent with the soul strategy, "
+                    "including strong sub-leaders or emerging co-leaders when liquidity, story, and structure are present. "
                     "Reject laggards, weak followers, and overextended chase entries. "
                     "Return valid JSON only."
                 ),

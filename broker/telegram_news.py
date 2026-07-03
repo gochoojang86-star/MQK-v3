@@ -15,11 +15,14 @@ orchestrator는 get_recent_news() 동기 함수로 DB에서 직접 읽습니다.
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import requests
 
 _KST = timezone(timedelta(hours=9))
 _OPERATE_START = 6   # KST 06:00
@@ -235,6 +238,64 @@ def _is_operating_hour(now: datetime | None = None) -> bool:
     return _OPERATE_START <= current.hour < _OPERATE_END
 
 
+def _clean_html_text(text: str) -> str:
+    cleaned = re.sub(r"<[^>]+>", " ", text or "")
+    cleaned = html.unescape(cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _fetch_url_summary(url: str, max_chars: int = 500) -> str:
+    """기사 URL에서 짧은 요약을 추출한다.
+
+    우선순위:
+    1. og:description / description 메타
+    2. article 본문 첫 문단들
+    3. 전체 p 태그 중 가장 긴 문단들
+    """
+    normalized = str(url or "").strip()
+    if not normalized or not normalized.startswith(("http://", "https://")):
+        return ""
+    try:
+        resp = requests.get(
+            normalized,
+            timeout=5,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        resp.raise_for_status()
+        body = resp.text or ""
+    except Exception:
+        return ""
+
+    for tag in re.findall(r"<meta[^>]+>", body, flags=re.IGNORECASE):
+        lowered = tag.lower()
+        if "og:description" not in lowered and 'name="description"' not in lowered and "name='description'" not in lowered:
+            continue
+        match = re.search(r'content=["\'](.*?)["\']', tag, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            summary = _clean_html_text(match.group(1))
+            if len(summary) >= 20:
+                return summary[:max_chars]
+
+    article_match = re.search(r"<article[^>]*>(.*?)</article>", body, flags=re.IGNORECASE | re.DOTALL)
+    article_html = article_match.group(1) if article_match else body
+    paragraphs = [
+        _clean_html_text(p)
+        for p in re.findall(r"<p[^>]*>(.*?)</p>", article_html, flags=re.IGNORECASE | re.DOTALL)
+    ]
+    paragraphs = [p for p in paragraphs if len(p) >= 30]
+    if not paragraphs:
+        return ""
+    summary = " ".join(paragraphs[:3]).strip()
+    return summary[:max_chars]
+
+
 # ── 공개 읽기 인터페이스 (orchestrator에서 호출) ───────────────────────────────
 
 def get_recent_news(ticker: str = "", hours: int = 2) -> list[dict]:
@@ -373,6 +434,8 @@ async def _run() -> None:
                 text += " " + (wp.title or "")
                 content = (wp.description or "")[:500]   # 기사 요약 최대 500자
                 url = wp.url or ""
+            if not content and url:
+                content = _fetch_url_summary(url, max_chars=500)
 
             if any(k in text for k in _SKIP) or len(text) < 10:
                 return
