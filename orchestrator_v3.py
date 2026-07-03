@@ -91,6 +91,7 @@ _INTRADAY_PROPOSAL_REASON_CODES = {
     "PRICE_SIGNAL",
     "LIMIT_UP_FAIL",
     "REVERSAL_PROFIT",
+    "RESISTANCE_BREAKOUT_ENTRY",
 }
 
 
@@ -188,6 +189,7 @@ def _infer_intraday_proposal_reason_code(proposal: dict) -> str:
         "LIMIT_UP_PULLBACK": "LIMIT_UP_PULLBACK_ENTRY",
         "RELATIVE_STRENGTH": "RELATIVE_STRENGTH_ENTRY",
         "TREND": "TREND_ENTRY",
+        "RESISTANCE_BREAKOUT": "RESISTANCE_BREAKOUT_ENTRY",
     }
     return setup_map.get(setup, "BUY_CANDIDATE")
 
@@ -801,7 +803,10 @@ class MQKOrchestratorV3:
         if is_crash:
             context["crash_reason"] = crash_reason
         result = self._trading_agent.run(TradingPhase.INTRADAY, context)
-        result = self._sanitize_intraday_result(result)
+        result = self._sanitize_intraday_result(
+            result,
+            resistance_breakout_allowed=context["exploration_policy"]["resistance_breakout_allowed"],
+        )
         self._record_tool_request(result, TradingPhase.INTRADAY, regime)
         self._alert_on_tool_failures(result, TradingPhase.INTRADAY)
         self._merge_watchlist_additions(result)
@@ -1727,7 +1732,7 @@ class MQKOrchestratorV3:
             save_watchlist(merged, path=_WATCHLIST_PATH)
             logger.info(f"[WATCHLIST MERGE] intraday additions={additions} → {[entry['ticker'] for entry in merged]}")
 
-    def _sanitize_intraday_result(self, result: dict) -> dict:
+    def _sanitize_intraday_result(self, result: dict, resistance_breakout_allowed: bool = True) -> dict:
         if not isinstance(result, dict):
             return {
                 "action": "NO_TRADE",
@@ -1748,6 +1753,16 @@ class MQKOrchestratorV3:
                 continue
             side = str(proposal.get("side") or "").upper()
             if side not in {"BUY", "SELL"}:
+                continue
+            if (
+                not resistance_breakout_allowed
+                and side == "BUY"
+                and _normalize_setup_name(proposal.get("setup")) == "RESISTANCE_BREAKOUT"
+            ):
+                logger.warning(
+                    f"[V3 INTRADAY] resistance_breakout_allowed=False인데 RESISTANCE_BREAKOUT BUY "
+                    f"proposal 포함({proposal.get('ticker')}) — 안전상 제거"
+                )
                 continue
             proposal_reason_code = _normalize_reason_code(proposal.get("standardized_reason_code"))
             if proposal_reason_code not in _INTRADAY_PROPOSAL_REASON_CODES:

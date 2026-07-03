@@ -1705,6 +1705,39 @@ def test_sanitize_intraday_result_preserves_explicit_standardized_reason_codes(t
     assert result["standardized_reason_code"] == "STALE_REGIME"
 
 
+def test_sanitize_intraday_result_strips_resistance_breakout_buy_when_not_allowed(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    result = {
+        "action": "BUY",
+        "proposals": [
+            {"ticker": "005930", "side": "BUY", "setup": "RESISTANCE_BREAKOUT", "confidence": 80,
+             "stop_loss_price": 290000, "reason": "라운드피겨 돌파"},
+        ],
+        "reason": "돌파 진입",
+    }
+
+    sanitized = orch._sanitize_intraday_result(result, resistance_breakout_allowed=False)
+
+    assert sanitized["proposals"] == []
+
+
+def test_sanitize_intraday_result_keeps_resistance_breakout_buy_when_allowed(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    result = {
+        "action": "BUY",
+        "proposals": [
+            {"ticker": "005930", "side": "BUY", "setup": "RESISTANCE_BREAKOUT", "confidence": 80,
+             "stop_loss_price": 290000, "reason": "라운드피겨 돌파"},
+        ],
+        "reason": "돌파 진입",
+    }
+
+    sanitized = orch._sanitize_intraday_result(result, resistance_breakout_allowed=True)
+
+    assert len(sanitized["proposals"]) == 1
+    assert sanitized["proposals"][0]["standardized_reason_code"] == "RESISTANCE_BREAKOUT_ENTRY"
+
+
 def test_run_intraday_v3_skips_on_stale_regime(monkeypatch, tmp_path):
     orch = make_orchestrator(tmp_path)  # _today = "2026-06-09"
     regime = {"status": "YELLOW", "regime": "SIDEWAYS", "confidence": 50,
