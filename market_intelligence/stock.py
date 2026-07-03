@@ -421,6 +421,15 @@ def get_watchlist_intraday_snapshot(ctx: MILContext, phase: str, tickers: list[s
                 missing_fields.append("intraday_candles")
 
             try:
+                ohlcv = get_ohlcv(ctx, phase, ticker, period=25)
+                item["resistance"] = _compute_resistance_facts(
+                    ohlcv.get("candles", []), item.get("price", 0.0)
+                )
+            except Exception:
+                item["resistance"] = _compute_resistance_facts([], 0.0)
+                missing_fields.append("resistance")
+
+            try:
                 status = get_stock_status(ctx, phase, ticker)
                 item["status"] = {
                     "trading_halted": bool(status.get("trading_halted")),

@@ -527,6 +527,55 @@ def test_get_watchlist_intraday_snapshot_bundles_price_news_and_status(monkeypat
     assert "latest_headlines" not in result["tickers"][0]
 
 
+def test_get_watchlist_intraday_snapshot_includes_resistance_facts(monkeypatch):
+    import market_intelligence.stock as mil_stock
+    import market_intelligence.risk_filter as mil_risk_filter
+
+    monkeypatch.setattr(mil_stock, "get_recent_news", lambda ticker="", hours=2: [])
+    monkeypatch.setattr(
+        mil_risk_filter,
+        "get_stock_status",
+        lambda ctx, phase, ticker: {"ticker": ticker, "is_limit_up": False, "is_limit_down": False, "is_vi": False,
+                                    "trading_halted": False, "administrative_issue": False},
+    )
+
+    class FakeNaver:
+        def search(self, query, display=5):
+            return []
+
+    monkeypatch.setattr(mil_stock, "NaverNewsFetcher", FakeNaver)
+
+    ctx = make_ctx(
+        raw_responses={
+            "FHKST11300006": {
+                "output": [{"inter_shrn_iscd": "000660", "inter2_prpr": "101000", "prdy_ctrt": "5.0", "acml_vol": "200"}],
+            },
+            "FHKST03010200": {"output2": []},
+            "FHKST01011800": {"output": []},
+            "FHKST03010100": {
+                "output1": {"stck_prpr": "101000"},
+                "output2": (
+                    [{"stck_bsop_date": f"2026060{i}", "stck_oprc": "90000", "stck_hgpr": "95000",
+                      "stck_lwpr": "89000", "stck_clpr": "94000", "acml_vol": "100000",
+                      "acml_tr_pbmn": "1000000000"} for i in range(1, 10)]
+                    + [{"stck_bsop_date": "20260620", "stck_oprc": "94000", "stck_hgpr": "100000",
+                        "stck_lwpr": "93000", "stck_clpr": "99000", "acml_vol": "100000",
+                        "acml_tr_pbmn": "1000000000"}]
+                    + [{"stck_bsop_date": "20260703", "stck_oprc": "99000", "stck_hgpr": "101500",
+                        "stck_lwpr": "98500", "stck_clpr": "101000", "acml_vol": "100000",
+                        "acml_tr_pbmn": "1000000000"}]  # 당일(미마감) 봉 — 마지막
+                ),
+            },
+        },
+    )
+
+    result = get_watchlist_intraday_snapshot(ctx, "INTRADAY", tickers=["000660"])
+
+    resistance = result["tickers"][0]["resistance"]
+    assert resistance["resistance_20d_high"] == 100_000.0
+    assert resistance["is_breakout_20d_high"] is True
+
+
 def test_get_watchlist_intraday_snapshot_uses_hts_avls_for_market_cap(monkeypatch):
     import market_intelligence.stock as mil_stock
     import market_intelligence.risk_filter as mil_risk_filter
