@@ -1,6 +1,7 @@
 """조건검색 도구 4개: psearch_title, psearch_result, get_top_movers, get_attention_rank"""
 from __future__ import annotations
 
+from broker.kiwoom_api import _abs_float
 from market_intelligence.base import MILContext
 
 
@@ -458,7 +459,7 @@ def get_bid_queue_surge(ctx: MILContext, phase: str) -> dict:
                     entry = {
                         "ticker": ticker,
                         "name": row.get("stk_nm", ""),
-                        "price": _to_float(row.get("cur_prc")),
+                        "price": _abs_float(row.get("cur_prc")),  # 키움은 등락 방향을 가격 부호로 표시
                         "base_qty": _to_float(row.get("int")),
                         "current_qty": _to_float(row.get("now")),
                         "surge_qty": _to_float(row.get("sdnin_qty")),
@@ -483,13 +484,26 @@ def get_bid_queue_surge(ctx: MILContext, phase: str) -> dict:
 
 
 def get_premarket_movers(ctx: MILContext, phase: str) -> dict:
-    """KIS FHPST01820000 예상체결 등락률 상위.
+    """동시호가(08:30~09:00) 예상체결 등락률 상위.
 
-    장 시작 전(08:30~09:00) 또는 장 중 예상 갭업/갭다운 종목 스캔.
-    antc_tr_pbmn = 예상 거래대금(원). stck_prpr = 예상체결가.
+    키움 ka10029를 우선 시도하고, 실패 시 KIS FHPST01820000으로 폴백.
     """
 
     def fetch():
+        # ── Kiwoom ka10029 우선 ───────────────────────────────────────────────
+        if ctx.kiwoom_api and ctx.kiwoom_api.available:
+            try:
+                rows = ctx.kiwoom_api.exp_cntr_rank(
+                    market="000",
+                    sort_tp="1",   # 상승률 순
+                    stock_filter="16",  # ETF+ETN 제외
+                )
+                if rows:
+                    return {"movers": rows[:30], "source": "kiwoom_ka10029"}
+            except Exception:
+                pass  # KIS 폴백으로 계속
+
+        # ── KIS FHPST01820000 폴백 ───────────────────────────────────────────
         raw = ctx.kis_api.raw_get(
             "FHPST01820000",
             "domestic-stock/v1/ranking/exp-trans-updown",
@@ -515,14 +529,13 @@ def get_premarket_movers(ctx: MILContext, phase: str) -> dict:
                 "base_price": _to_float(row.get("stck_sdpr")),
                 "change_pct": _to_float(row.get("prdy_ctrt")),
                 "exp_volume": _to_float(row.get("cntg_vol")),
-                "exp_trading_value_krw": _to_float(row.get("antc_tr_pbmn")),
-                "total_ask_qty": _to_float(row.get("total_askp_rsqn")),
-                "total_bid_qty": _to_float(row.get("total_bidp_rsqn")),
+                "ask_qty": _to_float(row.get("total_askp_rsqn")),
+                "bid_qty": _to_float(row.get("total_bidp_rsqn")),
             }
             for row in rows[:30]
             if row.get("stck_shrn_iscd")
         ]
-        return {"movers": movers}
+        return {"movers": movers, "source": "kis_fhpst01820000"}
 
     return ctx.cached_call("get_premarket_movers", phase, {}, fetch)
 
@@ -687,7 +700,7 @@ def get_foreign_continuous_rank(ctx: MILContext, phase: str) -> dict:
                 {
                     "ticker": str(row.get("stk_cd") or "").strip(),
                     "name": row.get("stk_nm", ""),
-                    "price": _to_float(row.get("cur_prc")),
+                    "price": _abs_float(row.get("cur_prc")),  # 키움은 등락 방향을 가격 부호로 표시
                     "change_pct": _to_float(row.get("pred_pre")),
                     "d1_qty": _to_float(row.get("dm1")),
                     "d2_qty": _to_float(row.get("dm2")),
@@ -741,7 +754,7 @@ def get_program_netbuy_rank(ctx: MILContext, phase: str) -> dict:
                         "ticker": ticker,
                         "name": name,
                         "rank": _to_int(row.get("rank")),
-                        "price": _to_float(row.get("cur_prc")),
+                        "price": _abs_float(row.get("cur_prc")),  # 키움은 등락 방향을 가격 부호로 표시
                         "change_pct": _to_float(row.get("flu_rt")),
                         "program_sell_amount_mnkrw": _to_float(row.get("prm_sell_amt")),
                         "program_buy_amount_mnkrw": _to_float(row.get("prm_buy_amt")),
@@ -796,7 +809,7 @@ def get_volume_surge(ctx: MILContext, phase: str) -> dict:
                 {
                     "ticker": str(row.get("stk_cd") or "").strip(),
                     "name": row.get("stk_nm", ""),
-                    "price": _to_float(row.get("cur_prc")),
+                    "price": _abs_float(row.get("cur_prc")),  # 키움은 등락 방향을 가격 부호로 표시
                     "change_pct": _to_float(row.get("flu_rt")),
                     "prev_volume": _to_float(row.get("prev_trde_qty")),
                     "now_volume": _to_float(row.get("now_trde_qty")),

@@ -94,6 +94,49 @@ def test_get_intraday_candles_parses_minute_bars():
     assert result["candles"][0]["close"] == 69900.0
 
 
+class StubKiwoomApi:
+    """intraday_candles(ka10080)가 부호 포함 가격 문자열을 돌려주는 상황을 흉내낸다."""
+
+    available = True
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def intraday_candles(self, ticker: str, tic_scope: str = "1") -> dict:
+        return {"stk_min_pole_chart_qry": self._rows}
+
+
+def test_get_intraday_candles_strips_kiwoom_direction_sign_from_price():
+    """2026-07-03 실사고: 000660 09:19~09:20 분봉이 open/low/close에 '-' 부호가 붙어
+    (예: '-2186000') LLM에게 마이너스 가격으로 전달됐다. 키움 ka10080은 전일/직전
+    대비 등락 방향을 가격 문자열 부호로 표시하므로(예: intraday_candles_full_day가
+    이미 _abs_float로 처리 중), 단일조회 경로도 절댓값으로 정규화해야 한다."""
+    ctx = make_ctx()
+    ctx.kiwoom_api = StubKiwoomApi(rows=[
+        {"cntr_tm": f"{datetime_today()}091900", "open_pric": "2192000", "high_pric": "2195000",
+         "low_pric": "-2179000", "cur_prc": "-2186000", "trde_qty": "35198"},
+        {"cntr_tm": f"{datetime_today()}092000", "open_pric": "-2186000", "high_pric": "2193000",
+         "low_pric": "-2183000", "cur_prc": "2192000", "trde_qty": "14111"},
+    ])
+
+    result = get_intraday_candles(ctx, "INTRADAY", ticker="000660")
+
+    for candle in result["candles"]:
+        assert candle["open"] > 0
+        assert candle["high"] > 0
+        assert candle["low"] > 0
+        assert candle["close"] > 0
+    assert result["candles"][0]["low"] == 2179000.0
+    assert result["candles"][0]["close"] == 2186000.0
+    assert result["candles"][1]["open"] == 2186000.0
+    assert result["candles"][1]["low"] == 2183000.0
+
+
+def datetime_today() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y%m%d")
+
+
 def test_get_intraday_candles_force_refresh_bypasses_cache():
     ctx = make_ctx(
         raw_responses={

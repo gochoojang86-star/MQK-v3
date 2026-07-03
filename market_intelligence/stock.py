@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from broker.kiwoom_api import _abs_float, _abs_int
 from broker.telegram_news import get_recent_news, search_recent_news
 from codes.news_fetcher import NaverNewsFetcher
 from market_intelligence.base import MILContext, ToolFailure
@@ -107,14 +108,19 @@ def _fetch_intraday_candles_raw(ctx: MILContext, ticker: str, full_day: bool = F
                 raw = ctx.kiwoom_api.intraday_candles(ticker)
                 candles_data = raw.get("stk_min_pole_chart_qry", [])
                 today_str = datetime.now().strftime("%Y%m%d")
+                # 키움 ka10080은 가격을 전일/직전 대비 등락 방향의 부호(+/-)를 붙여
+                # 반환한다 — 문자열의 '-'는 음수가 아니라 "하락 표시"다. _to_float를
+                # 그대로 쓰면 하락 분봉의 OHLC가 마이너스 가격으로 파싱된다
+                # (2026-07-03 000660 09:19~09:20 분봉 실사고, intraday_candles_full_day는
+                # 이미 _abs_float로 처리 중이었으나 이 단일조회 경로만 누락돼 있었음).
                 candles = [
                     {
                         "time": (row.get("cntr_tm") or "")[8:12],
-                        "open": _to_float(row.get("open_pric")),
-                        "high": _to_float(row.get("high_pric")),
-                        "low": _to_float(row.get("low_pric")),
-                        "close": _to_float(row.get("cur_prc")),
-                        "volume": _to_float(row.get("trde_qty")),
+                        "open": _abs_float(row.get("open_pric")),
+                        "high": _abs_float(row.get("high_pric")),
+                        "low": _abs_float(row.get("low_pric")),
+                        "close": _abs_float(row.get("cur_prc")),
+                        "volume": _abs_int(row.get("trde_qty")),
                     }
                     for row in candles_data
                     if (row.get("cntr_tm") or "")[:8] == today_str

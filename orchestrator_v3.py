@@ -587,6 +587,16 @@ class MQKOrchestratorV3:
         context = self._build_context(TradingPhase.PREMARKET, regime_dict, "STABLE", watchlist=[])
         context["next_day_prior"] = load_next_day_premarket_context(path=_NEXT_DAY_PREMARKET_CONTEXT_PATH)
         context["session_type"] = session_type
+
+        # 예상체결 상위 주입 — 08:50(OPENING) 에서 ka10029/KIS 예상체결 데이터 제공
+        try:
+            premarket = mil_screening.get_premarket_movers(
+                self._mil, TradingPhase.PREMARKET.value
+            )
+            context["premarket_movers"] = premarket.get("movers", [])
+        except Exception as e:
+            logger.warning(f"[V3 PREMARKET] premarket_movers 조회 실패 — 스킵: {e}")
+            context["premarket_movers"] = []
         review = self._trading_agent.run(TradingPhase.PREMARKET, context)
         self._record_tool_request(review, TradingPhase.PREMARKET, regime_dict)
         self._alert_on_tool_failures(review, TradingPhase.PREMARKET)

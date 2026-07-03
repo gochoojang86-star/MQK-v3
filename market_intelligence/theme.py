@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from broker.kiwoom_api import KiwoomApi
+from broker.kiwoom_api import KiwoomApi, _abs_float
 from market_intelligence.base import MILContext
 
 
@@ -59,7 +59,7 @@ def get_theme_candidates(
                 if ticker in seen:
                     continue
                 seen.add(ticker)
-                current_price = _to_float(row.get("cur_prc"))
+                current_price = _abs_float(row.get("cur_prc"))  # 키움은 등락 방향을 가격 부호로 표시
                 volume = _to_float(row.get("acc_trde_qty"))
                 candidates.append(
                     {

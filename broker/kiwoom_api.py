@@ -596,6 +596,68 @@ class KiwoomApi:
         result.sort(key=lambda x: x["date"])
         return result[-limit:]
 
+    def exp_cntr_rank(
+        self,
+        market: str = "000",
+        sort_tp: str = "1",
+        stock_filter: str = "16",
+    ) -> list[dict]:
+        """ka10029 예상체결등락률상위요청 — 동시호가(08:30~09:00) 예상체결 상위 종목.
+
+        Args:
+            market: "000"=전체, "001"=코스피, "101"=코스닥
+            sort_tp: "1"=상승률, "2"=상승폭, "3"=보합, "4"=하락률, "5"=하락폭, "7"=상한
+            stock_filter: "16"=ETF+ETN제외, "1"=관리종목제외, "0"=전체
+
+        Returns:
+            [{"ticker", "name", "exp_price", "base_price", "change_pct",
+              "exp_volume", "ask_qty", "bid_qty"}]
+        """
+        self._guard_rate_limit("ka10029")
+        self._respect_min_interval("ka10029")
+        resp = requests.post(
+            f"{self._cfg.base_url}/api/dostk/rkinfo",
+            headers=self._api_headers("ka10029"),
+            json={
+                "mrkt_tp": market,
+                "sort_tp": sort_tp,
+                "trde_qty_cnd": "0",
+                "stk_cnd": stock_filter,
+                "crd_cnd": "0",
+                "pric_cnd": "0",
+                "stex_tp": "3",
+            },
+            timeout=10,
+        )
+        self._mark_call("ka10029")
+        if resp.status_code == 429:
+            self._apply_rate_limit("ka10029", "http_429")
+            raise KiwoomRateLimitError("ka10029 rate limited (HTTP 429)")
+        resp.raise_for_status()
+        data = resp.json()
+        if self._looks_like_rate_limit(data):
+            self._apply_rate_limit("ka10029", "payload")
+            raise KiwoomRateLimitError("ka10029 rate limited")
+
+        rows: list[dict] = []
+        for r in data.get("exp_cntr_flu_rt_upper", []):
+            ticker = (r.get("stk_cd") or "").strip()
+            if not ticker:
+                continue
+            sig = r.get("pred_pre_sig") or "3"
+            sign = -1 if sig in ("4", "5") else 1
+            rows.append({
+                "ticker": ticker,
+                "name": (r.get("stk_nm") or "").strip(),
+                "exp_price": _abs_float(r.get("exp_cntr_pric")),
+                "base_price": _abs_float(r.get("base_pric")),
+                "change_pct": _abs_float(r.get("flu_rt")) * sign,
+                "exp_volume": _abs_int(r.get("exp_cntr_qty")),
+                "ask_qty": _abs_int(r.get("sel_req")),
+                "bid_qty": _abs_int(r.get("buy_req")),
+            })
+        return rows
+
     def overtime_rank(
         self,
         market: str = "000",

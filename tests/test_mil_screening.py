@@ -1,9 +1,12 @@
 """market_intelligence/screening.py 테스트"""
 from market_intelligence.base import MILContext
 from market_intelligence.screening import (
+    get_bid_queue_surge,
+    get_foreign_continuous_rank,
     get_limit_up_stocks,
     get_program_netbuy_rank,
     get_top_movers,
+    get_volume_surge,
     psearch_result,
     psearch_title,
 )
@@ -22,11 +25,24 @@ class StubKisApi:
 class StubKiwoomApi:
     available = True
 
-    def __init__(self, program_rows=None):
+    def __init__(self, program_rows=None, bid_queue_rows=None, foreign_continuous_rows=None,
+                 volume_surge_rows=None):
         self._program_rows = program_rows or {}
+        self._bid_queue_rows = bid_queue_rows or []
+        self._foreign_continuous_rows = foreign_continuous_rows or []
+        self._volume_surge_rows = volume_surge_rows or []
 
     def program_netbuy_top(self, mrkt_tp="P00101"):
         return {"prm_netprps_upper_50": self._program_rows.get(mrkt_tp, [])}
+
+    def bid_queue_surge(self, mrkt_tp="001"):
+        return {"bid_req_sdnin": self._bid_queue_rows if mrkt_tp == "001" else []}
+
+    def foreign_continuous_rank(self):
+        return {"for_cont_nettrde_upper": self._foreign_continuous_rows}
+
+    def volume_surge(self):
+        return {"trde_qty_sdnin": self._volume_surge_rows}
 
 
 def make_ctx(**kwargs):
@@ -178,6 +194,37 @@ def test_get_program_netbuy_rank_filters_non_equity_products_and_sorts():
     result = get_program_netbuy_rank(ctx, "SCAN")
     assert [row["ticker"] for row in result["stocks"][:2]] == ["000660", "240810"]
     assert all("KODEX" not in row["name"] for row in result["stocks"])
+
+
+def test_get_bid_queue_surge_strips_kiwoom_direction_sign_from_price():
+    """2026-07-03 000660 분봉 사고와 같은 근본원인: 키움 cur_prc는 등락 방향을 부호로
+    표시하므로(예: '-64000'), 하락 종목의 price가 그대로 음수로 새어나가면 안 된다."""
+    ctx = make_ctx(kiwoom_api=StubKiwoomApi(bid_queue_rows=[
+        {"stk_cd": "005930", "stk_nm": "삼성전자", "cur_prc": "-71000",
+         "int": "1000", "now": "5000", "sdnin_qty": "4000", "sdnin_rt": "400.0"},
+    ]))
+    result = get_bid_queue_surge(ctx, "SCAN")
+    assert result["stocks"][0]["price"] == 71000.0
+
+
+def test_get_foreign_continuous_rank_strips_kiwoom_direction_sign_from_price():
+    ctx = make_ctx(kiwoom_api=StubKiwoomApi(foreign_continuous_rows=[
+        {"stk_cd": "000660", "stk_nm": "SK하이닉스", "cur_prc": "-2196000", "pred_pre": "-15000",
+         "dm1": "1000", "dm2": "900", "dm3": "800", "tot": "2700", "limit_exh_rt": "12.5"},
+    ]))
+    result = get_foreign_continuous_rank(ctx, "SCAN")
+    assert result["stocks"][0]["price"] == 2196000.0
+    # change_pct(전일대비)는 부호 자체가 의미 있으므로 그대로 음수여야 한다
+    assert result["stocks"][0]["change_pct"] == -15000.0
+
+
+def test_get_volume_surge_strips_kiwoom_direction_sign_from_price():
+    ctx = make_ctx(kiwoom_api=StubKiwoomApi(volume_surge_rows=[
+        {"stk_cd": "000660", "stk_nm": "SK하이닉스", "cur_prc": "-2196000", "flu_rt": "-3.2",
+         "prev_trde_qty": "1000", "now_trde_qty": "5000", "sdnin_qty": "4000", "sdnin_rt": "400.0"},
+    ]))
+    result = get_volume_surge(ctx, "SCAN")
+    assert result["stocks"][0]["price"] == 2196000.0
 
 
 def test_get_limit_up_stocks_uses_20pct_threshold_for_premarket_sejuk():
