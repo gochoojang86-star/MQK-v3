@@ -171,6 +171,53 @@ def _infer_intraday_top_level_reason_code(action: str, reason: str) -> str:
     return "HOLD_MISC"
 
 
+def _extract_intraday_snapshot_map(tool_history: list[dict]) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    for entry in tool_history:
+        if str(entry.get("tool") or "") != "get_watchlist_intraday_snapshot":
+            continue
+        for row in (((entry.get("result") or {}).get("tickers")) or []):
+            ticker = str((row or {}).get("ticker") or "").strip()
+            if ticker:
+                rows[ticker] = row
+    return rows
+
+
+def _extract_intraday_volume_map(tool_history: list[dict]) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    for entry in tool_history:
+        if str(entry.get("tool") or "") != "get_intraday_volume_trend":
+            continue
+        result = entry.get("result") or {}
+        ticker = str(result.get("ticker") or ((entry.get("args") or {}).get("ticker")) or "").strip()
+        if ticker:
+            rows[ticker] = result
+    return rows
+
+
+def _is_high_chase_without_volume_support(proposal: dict, snapshot_row: dict | None, volume_row: dict | None) -> bool:
+    if str(proposal.get("side") or "").upper() != "BUY":
+        return False
+    if not snapshot_row:
+        return False
+
+    day_high = _to_float(snapshot_row.get("day_high"))
+    price = _to_float(snapshot_row.get("price")) or _to_float(((snapshot_row.get("latest_candle") or {}).get("close")))
+    if day_high <= 0 or price <= 0:
+        return False
+
+    near_high = price >= day_high * 0.998
+    if not near_high:
+        return False
+
+    recent_avg = _to_float((volume_row or {}).get("recent_avg_krw"))
+    prev_avg = _to_float((volume_row or {}).get("prev_avg_krw"))
+    trend = str((volume_row or {}).get("trend") or "").upper()
+    no_volume_evidence = recent_avg <= 0 or prev_avg <= 0
+    declining = trend == "DECLINING"
+    return no_volume_evidence or declining
+
+
 def _infer_intraday_proposal_reason_code(proposal: dict) -> str:
     side = str(proposal.get("side") or "").upper()
     if side == "SELL":
@@ -1783,6 +1830,34 @@ class MQKOrchestratorV3:
             valid_proposals = [p for p in valid_proposals if str(p.get("side") or "").upper() == "SELL"]
         elif action == "BUY":
             valid_proposals = [p for p in valid_proposals if str(p.get("side") or "").upper() in {"BUY", "SELL"}]
+
+        tool_history = result.get("tool_history") or []
+        if not isinstance(tool_history, list):
+            tool_history = []
+        if action == "BUY" and valid_proposals:
+            snapshot_map = _extract_intraday_snapshot_map(tool_history)
+            volume_map = _extract_intraday_volume_map(tool_history)
+            buy_proposals = [p for p in valid_proposals if str(p.get("side") or "").upper() == "BUY"]
+            if buy_proposals and all(
+                _is_high_chase_without_volume_support(
+                    proposal,
+                    snapshot_map.get(str(proposal.get("ticker") or "").strip()),
+                    volume_map.get(str(proposal.get("ticker") or "").strip()),
+                )
+                for proposal in buy_proposals
+            ):
+                reason = str(result.get("reason") or "").strip()
+                if reason:
+                    reason = f"{reason} 고점 근처인데 거래대금 추세 근거가 약해 추격 BUY는 보류."
+                else:
+                    reason = "high_chase_without_volume_support"
+                return {
+                    **result,
+                    "action": "HOLD",
+                    "reason": reason,
+                    "proposals": [],
+                    "standardized_reason_code": "LATE_CHASE_RISK",
+                }
 
         if top_level_reason_code not in _INTRADAY_TOPLEVEL_REASON_CODES:
             top_level_reason_code = _infer_intraday_top_level_reason_code(action, result.get("reason", ""))

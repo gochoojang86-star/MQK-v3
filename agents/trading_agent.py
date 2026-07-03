@@ -138,6 +138,84 @@ PHASE_TOOLS: dict[TradingPhase, list[str]] = {
     ],
 }
 
+
+def _safe_float(value: Any) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _intraday_buy_requires_volume_trend(response: dict, tool_history: list[dict]) -> str:
+    if str(response.get("action") or "").upper() != "BUY":
+        return ""
+
+    proposals = response.get("proposals") or []
+    if not isinstance(proposals, list):
+        return ""
+
+    snapshots: dict[str, dict] = {}
+    volume_called: set[str] = set()
+    for entry in tool_history:
+        tool = str(entry.get("tool") or "")
+        if tool == "get_watchlist_intraday_snapshot":
+            for row in (((entry.get("result") or {}).get("tickers")) or []):
+                ticker = str((row or {}).get("ticker") or "").strip()
+                if ticker:
+                    snapshots[ticker] = row
+        elif tool == "get_intraday_volume_trend":
+            ticker = str(((entry.get("result") or {}).get("ticker")) or ((entry.get("args") or {}).get("ticker")) or "").strip()
+            if ticker:
+                volume_called.add(ticker)
+
+    for proposal in proposals:
+        if str(proposal.get("side") or "").upper() != "BUY":
+            continue
+        ticker = str(proposal.get("ticker") or "").strip()
+        snapshot = snapshots.get(ticker) or {}
+        day_high = _safe_float(snapshot.get("day_high"))
+        price = _safe_float(snapshot.get("price")) or _safe_float(((snapshot.get("latest_candle") or {}).get("close")))
+        if day_high > 0 and price > 0 and price >= day_high * 0.998 and ticker not in volume_called:
+            return ticker
+    return ""
+
+
+def _intraday_requires_full_day_candles(response: dict, tool_history: list[dict]) -> str:
+    action = str(response.get("action") or "").upper()
+    if action not in {"BUY", "SELL", "HOLD"}:
+        return ""
+
+    watched_tickers: dict[str, int] = {}
+    full_day_called: set[str] = set()
+
+    for entry in tool_history:
+        tool = str(entry.get("tool") or "")
+        if tool == "get_watchlist_intraday_snapshot":
+            for row in (((entry.get("result") or {}).get("tickers")) or []):
+                ticker = str((row or {}).get("ticker") or "").strip()
+                candle_count = int((row or {}).get("candle_count") or 0)
+                if ticker:
+                    watched_tickers[ticker] = candle_count
+        elif tool == "get_intraday_candles":
+            args = entry.get("args") or {}
+            ticker = str(args.get("ticker") or "").strip()
+            if ticker and bool(args.get("force_refresh")):
+                full_day_called.add(ticker)
+
+    proposal_tickers: list[str] = []
+    for proposal in (response.get("proposals") or []):
+        ticker = str((proposal or {}).get("ticker") or "").strip()
+        if ticker:
+            proposal_tickers.append(ticker)
+
+    targets = proposal_tickers or list(watched_tickers.keys())
+    for ticker in targets:
+        if watched_tickers.get(ticker, 0) < 10 and ticker not in full_day_called:
+            return ticker
+    return ""
+
 _TOOLS_REQUIRING_USER_ID = {"psearch_title", "psearch_result"}
 _NO_ARG_TOOLS = {
     "get_market_context",
@@ -287,6 +365,23 @@ class TradingAgent:
                 if _is_scan_final or _is_intraday_final:
                     response["next_action"] = "final"
                     next_action = "final"
+                elif _is_scan and _action.upper() == "NO_TRADE":
+                    transcript.append(json.dumps(
+                        {
+                            "error": "invalid_scan_final",
+                            "instruction": (
+                                "SCAN phase에서는 next_action 없이 NO_TRADE를 반환하면 안 된다. "
+                                "후보 풀이 비어 정말 관망이면 "
+                                "{\"next_action\":\"final\",\"action\":\"WAIT\",\"reason\":\"...\"} "
+                                "형식으로 답하고, 후보가 있으면 "
+                                "{\"next_action\":\"final\",\"action\":\"WATCHLIST_UPDATE\","
+                                "\"watchlist\":[...],\"candidates\":[...],\"reason\":\"...\"} "
+                                "형식으로 답하라."
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ))
+                    continue
             else:
                 _is_scan = hasattr(phase, "value") and str(phase.value) == "SCAN" or phase == TradingPhase.SCAN
 
@@ -328,6 +423,44 @@ class TradingAgent:
                             ),
                         }, ensure_ascii=False))
                         continue  # 루프 재실행 — 이번엔 도구를 호출해야 함
+
+                if _phase_str == "INTRADAY":
+                    required_full_day_ticker = _intraday_requires_full_day_candles(
+                        response=response,
+                        tool_history=tool_history,
+                    )
+                    if required_full_day_ticker:
+                        transcript.append(json.dumps({
+                            "error": "tool_call_required",
+                            "instruction": (
+                                "분봉 10개 미만 상태에서 최종 판단 금지. "
+                                "반드시 get_intraday_candles(force_refresh=true)로 "
+                                "당일 전체 분봉을 추가 조회한 뒤 판단하라. "
+                                "도구 호출 형식: "
+                                "{\"next_action\": \"call_tool\", "
+                                "\"tool\": \"get_intraday_candles\", "
+                                f"\"tool_args\": {{\"ticker\": \"{required_full_day_ticker}\", \"force_refresh\": true}}}}"
+                            ),
+                        }, ensure_ascii=False))
+                        continue
+
+                    required_volume_ticker = _intraday_buy_requires_volume_trend(
+                        response=response,
+                        tool_history=tool_history,
+                    )
+                    if required_volume_ticker:
+                        transcript.append(json.dumps({
+                            "error": "tool_call_required",
+                            "instruction": (
+                                "당일 고가 근처 BUY는 거래대금 추세 검증이 필수다. "
+                                "반드시 get_intraday_volume_trend를 먼저 호출하라. "
+                                "도구 호출 형식: "
+                                "{\"next_action\": \"call_tool\", "
+                                "\"tool\": \"get_intraday_volume_trend\", "
+                                f"\"tool_args\": {{\"ticker\": \"{required_volume_ticker}\"}}}}"
+                            ),
+                        }, ensure_ascii=False))
+                        continue
 
                 return self._attach_tool_history(response, tool_history)
 

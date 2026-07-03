@@ -8,6 +8,7 @@ from market_intelligence.stock import (
     get_news_stock,
     search_telegram_news,
     get_fundamentals,
+    get_intraday_volume_trend,
     get_watchlist_intraday_snapshot,
     _compute_resistance_facts,
     _round_figure_unit,
@@ -120,7 +121,28 @@ class StubKisApi:
 
 
 def make_ctx(**kwargs):
-    return MILContext(kis_api=StubKisApi(**kwargs))
+    kiwoom_api = kwargs.pop("kiwoom_api", None)
+    return MILContext(kis_api=StubKisApi(**kwargs), kiwoom_api=kiwoom_api)
+
+
+class StubKiwoomFullDayApi:
+    available = True
+
+    def __init__(self, candles):
+        self._candles = candles
+
+    def intraday_candles_full_day(self, ticker: str, base_dt: str | None = None, tic_scope: str = "1"):
+        return list(self._candles)
+
+
+class StubKiwoomIntradayApi:
+    available = True
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def intraday_candles(self, ticker: str, tic_scope: str = "1") -> dict:
+        return {"stk_min_pole_chart_qry": self._rows}
 
 
 def test_get_ohlcv_returns_output1_valuation_and_output2_candles():
@@ -171,6 +193,36 @@ def test_get_realtime_price_rejects_more_than_30_tickers():
     ctx = make_ctx(raw_responses={})
     with pytest.raises(ToolFailure):
         get_realtime_price(ctx, "INTRADAY", tickers=[f"{i:06d}" for i in range(31)])
+
+
+def test_get_realtime_price_falls_back_to_kiwoom_reference_when_kis_fails():
+    class FailingKisApi(StubKisApi):
+        def raw_get(self, tr_id, path, params, mode=None):
+            raise RuntimeError("KIS down")
+
+    ctx = MILContext(
+        kis_api=FailingKisApi(),
+        kiwoom_api=StubKiwoomIntradayApi(
+            rows=[
+                {
+                    "cntr_tm": f"{datetime_today()}093000",
+                    "open_pric": "69800",
+                    "high_pric": "70000",
+                    "low_pric": "69700",
+                    "cur_prc": "69900",
+                    "trde_qty": "5000",
+                },
+            ]
+        ),
+    )
+
+    result = get_realtime_price(ctx, "INTRADAY", tickers=["005930"])
+
+    assert result["source"] == "KIWOOM_INTRADAY_REFERENCE"
+    assert result["reference_only"] is True
+    assert result["prices"][0]["ticker"] == "005930"
+    assert result["prices"][0]["price"] == 69900.0
+    assert result["prices"][0]["source"] == "KIWOOM_INTRADAY_REFERENCE"
 
 
 def test_get_intraday_candles_parses_minute_bars():
@@ -743,3 +795,49 @@ def test_snapshot_guidance_when_no_candles(monkeypatch):
     assert result["tickers"][0]["candle_count"] == 0
     assert result["tickers"][0]["recent_candles"] == []
     assert "005930" in result["_guidance"]["thin_candles"]
+
+
+def test_get_intraday_volume_trend_uses_kiwoom_full_day_candles():
+    ctx = make_ctx()
+    candles = []
+    for idx in range(100):
+        hour = 9 + ((idx // 60) % 24)
+        minute = idx % 60
+        vol = 10 if idx < 50 else (30 if idx < 70 else 50)
+        candles.append(
+            {
+                "time": f"{hour:02d}{minute:02d}",
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+                "volume": float(vol),
+            }
+        )
+    ctx.kiwoom_api = StubKiwoomFullDayApi(candles)
+
+    result = get_intraday_volume_trend(ctx, "INTRADAY", "005930")
+
+    assert result["recent_avg_krw"] > 0
+    assert result["prev_avg_krw"] > 0
+    assert result["trend"] == "INCREASING"
+    assert result["source"] == "KIWOOM_FULL"
+    assert result["bar_count"] >= 10
+
+
+def test_get_intraday_volume_trend_returns_zero_when_kiwoom_bars_insufficient():
+    ctx = make_ctx()
+    ctx.kiwoom_api = StubKiwoomFullDayApi(
+        [
+            {"time": "0901", "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 10.0},
+            {"time": "0902", "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 10.0},
+            {"time": "0911", "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 10.0},
+        ]
+    )
+
+    result = get_intraday_volume_trend(ctx, "INTRADAY", "005930")
+
+    assert result["trend"] == "STABLE"
+    assert result["recent_avg_krw"] == 0
+    assert result["prev_avg_krw"] == 0
+    assert result["bar_count"] == 2

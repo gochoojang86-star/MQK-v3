@@ -138,6 +138,38 @@ def test_run_scan_requires_tool_before_final(monkeypatch):
     assert "tool_call_required" in llm.calls[1][1]
 
 
+def test_run_scan_retries_when_no_trade_missing_next_action():
+    llm = FakeLLMClient([
+        {"action": "NO_TRADE", "reason": "ambiguous"},
+        {
+            "next_action": "final",
+            "action": "WAIT",
+            "reason": "후보는 있지만 watchlist로 확정할 근거가 부족해 대기",
+        },
+    ])
+    agent = TradingAgent(mil=object(), llm=llm)
+    context = build_context(
+        phase=TradingPhase.SCAN,
+        trading_date="2026-06-09",
+        regime={"status": "YELLOW"},
+        drift_status="STABLE",
+        risk_guidance={},
+        portfolio_snapshot={},
+        daily_pnl={},
+        risk_budget_remaining={},
+        watchlist=[],
+        allowed_tools=[],
+    )
+    context["candidate_pool"] = [{"ticker": "005930", "name": "삼성전자"}]
+
+    result = agent.run(TradingPhase.SCAN, context)
+
+    assert result["action"] == "WAIT"
+    assert result["reason"] == "후보는 있지만 watchlist로 확정할 근거가 부족해 대기"
+    assert len(llm.calls) == 2
+    assert "invalid_scan_final" in llm.calls[1][1]
+
+
 def test_run_blocks_tool_not_allowed_in_phase():
     llm = FakeLLMClient([
         {"next_action": "call_tool", "tool": "get_open_positions", "tool_args": {}},
@@ -161,7 +193,7 @@ def test_run_blocks_tool_not_allowed_in_phase():
 def test_run_intraday_buy_requires_tool_before_final(monkeypatch):
     def fake_get_watchlist_intraday_snapshot(ctx, phase, tickers):
         return {
-            "snapshots": [
+            "tickers": [
                 {
                     "ticker": "005930",
                     "price": 81000,
@@ -241,6 +273,126 @@ def test_run_handles_tool_failure(monkeypatch):
 
     assert result["action"] == "NO_TRADE"
     assert "tool_failure" in llm.calls[1][1]
+
+
+def test_run_intraday_buy_near_day_high_requires_volume_trend(monkeypatch):
+    def fake_snapshot(ctx, phase, tickers):
+        return {
+            "tickers": [
+                {
+                    "ticker": "005930",
+                    "price": 304900.0,
+                    "day_high": 305000.0,
+                    "candle_count": 12,
+                    "latest_candle": {"close": 304900.0},
+                }
+            ]
+        }
+
+    def fake_volume_trend(ctx, phase, ticker):
+        return {
+            "ticker": ticker,
+            "trend": "STABLE",
+            "recent_avg_krw": 1000,
+            "prev_avg_krw": 1200,
+            "decline_pct": -16.7,
+            "signal": None,
+        }
+
+    monkeypatch.setitem(TOOL_REGISTRY, "get_watchlist_intraday_snapshot", fake_snapshot)
+    monkeypatch.setitem(TOOL_REGISTRY, "get_intraday_volume_trend", fake_volume_trend)
+
+    llm = FakeLLMClient([
+        {"next_action": "call_tool", "tool": "get_watchlist_intraday_snapshot", "tool_args": {"tickers": ["005930"]}},
+        {
+            "next_action": "final",
+            "action": "BUY",
+            "proposals": [{"ticker": "005930", "side": "BUY", "confidence": 80, "stop_loss_price": 300000}],
+            "reason": "near_high_buy",
+        },
+        {"next_action": "call_tool", "tool": "get_intraday_volume_trend", "tool_args": {"ticker": "005930"}},
+        {
+            "next_action": "final",
+            "action": "BUY",
+            "proposals": [{"ticker": "005930", "side": "BUY", "confidence": 80, "stop_loss_price": 300000}],
+            "reason": "after_volume_trend",
+        },
+    ])
+    agent = TradingAgent(mil=object(), llm=llm)
+    context = build_context(
+        phase=TradingPhase.INTRADAY, trading_date="2026-06-09",
+        regime={"status": "YELLOW"}, drift_status="STABLE",
+        risk_guidance={}, portfolio_snapshot={}, daily_pnl={}, risk_budget_remaining={},
+        watchlist=["005930"],
+    )
+
+    result = agent.run(TradingPhase.INTRADAY, context)
+
+    assert result["action"] == "BUY"
+    assert result["reason"] == "after_volume_trend"
+    assert len(result["tool_history"]) == 2
+    assert result["tool_history"][0]["tool"] == "get_watchlist_intraday_snapshot"
+    assert result["tool_history"][1]["tool"] == "get_intraday_volume_trend"
+    assert "get_intraday_volume_trend" in llm.calls[2][1]
+
+
+def test_run_intraday_thin_snapshot_requires_full_day_candles(monkeypatch):
+    def fake_snapshot(ctx, phase, tickers):
+        return {
+            "tickers": [
+                {
+                    "ticker": "005930",
+                    "price": 70100.0,
+                    "day_high": 70500.0,
+                    "candle_count": 5,
+                    "latest_candle": {"close": 70100.0},
+                }
+            ]
+        }
+
+    def fake_intraday_candles(ctx, phase, ticker, force_refresh=False):
+        assert force_refresh is True
+        return {
+            "ticker": ticker,
+            "candles": [{"time": f"09{idx:02d}", "close": 70000 + idx} for idx in range(15)],
+        }
+
+    monkeypatch.setitem(TOOL_REGISTRY, "get_watchlist_intraday_snapshot", fake_snapshot)
+    monkeypatch.setitem(TOOL_REGISTRY, "get_intraday_candles", fake_intraday_candles)
+
+    llm = FakeLLMClient([
+        {"next_action": "call_tool", "tool": "get_watchlist_intraday_snapshot", "tool_args": {"tickers": ["005930"]}},
+        {
+            "next_action": "final",
+            "action": "BUY",
+            "proposals": [{"ticker": "005930", "side": "BUY", "confidence": 72, "stop_loss_price": 69000}],
+            "reason": "thin_snapshot_buy",
+        },
+        {"next_action": "call_tool", "tool": "get_intraday_candles", "tool_args": {"ticker": "005930", "force_refresh": True}},
+        {
+            "next_action": "final",
+            "action": "BUY",
+            "proposals": [{"ticker": "005930", "side": "BUY", "confidence": 74, "stop_loss_price": 69000}],
+            "reason": "after_full_day",
+        },
+    ])
+    agent = TradingAgent(mil=object(), llm=llm)
+    context = build_context(
+        phase=TradingPhase.INTRADAY, trading_date="2026-06-09",
+        regime={"status": "YELLOW"}, drift_status="STABLE",
+        risk_guidance={}, portfolio_snapshot={}, daily_pnl={}, risk_budget_remaining={},
+        watchlist=["005930"],
+    )
+
+    result = agent.run(TradingPhase.INTRADAY, context)
+
+    assert result["action"] == "BUY"
+    assert result["reason"] == "after_full_day"
+    assert len(result["tool_history"]) == 2
+    assert result["tool_history"][1]["tool"] == "get_intraday_candles"
+    # instruction 문자열 안의 예시 JSON이 바깥 json.dumps로 한 번 더 이스케이프되므로
+    # 실제 user_msg에는 큰따옴표가 백슬래시로 이스케이프된 형태로 들어간다.
+    assert '\\"force_refresh\\": true' in llm.calls[2][1]
 
 
 def test_run_aborts_to_no_trade_after_three_tool_failures(monkeypatch):

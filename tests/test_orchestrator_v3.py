@@ -1735,6 +1735,56 @@ def test_sanitize_intraday_result_keeps_resistance_breakout_buy_when_allowed(tmp
     assert sanitized["proposals"][0]["standardized_reason_code"] == "RESISTANCE_BREAKOUT_ENTRY"
 
 
+def test_sanitize_intraday_result_blocks_high_chase_buy_without_volume_support(tmp_path):
+    orch = make_orchestrator(tmp_path)
+
+    result = orch._sanitize_intraday_result(
+        {
+            "action": "BUY",
+            "reason": "본류 대장주 추세 유지",
+            "tool_history": [
+                {
+                    "tool": "get_watchlist_intraday_snapshot",
+                    "result": {
+                        "tickers": [
+                            {
+                                "ticker": "005930",
+                                "price": 304900,
+                                "day_high": 305000,
+                                "latest_candle": {"close": 304900},
+                            }
+                        ]
+                    },
+                },
+                {
+                    "tool": "get_intraday_volume_trend",
+                    "result": {
+                        "ticker": "005930",
+                        "trend": "STABLE",
+                        "recent_avg_krw": 0,
+                        "prev_avg_krw": 0,
+                    },
+                },
+            ],
+            "proposals": [
+                {
+                    "ticker": "005930",
+                    "side": "BUY",
+                    "setup": "THEME_CATALYST",
+                    "confidence": 81,
+                    "stop_loss_price": 300000,
+                    "standardized_reason_code": "THEME_CATALYST_ENTRY",
+                    "reason": "고가 근처 재상승",
+                }
+            ],
+        }
+    )
+
+    assert result["action"] == "HOLD"
+    assert result["standardized_reason_code"] == "LATE_CHASE_RISK"
+    assert result["proposals"] == []
+
+
 def test_run_intraday_v3_skips_on_stale_regime(monkeypatch, tmp_path):
     orch = make_orchestrator(tmp_path)  # _today = "2026-06-09"
     regime = {"status": "YELLOW", "regime": "SIDEWAYS", "confidence": 50,

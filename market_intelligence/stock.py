@@ -100,26 +100,53 @@ def get_realtime_price(ctx: MILContext, phase: str, tickers: list[str]) -> dict:
         raise ToolFailure("get_realtime_price: 최대 30종목까지만 조회 가능")
 
     def fetch():
-        params = {"FID_COND_MRKT_DIV_CODE_1": "J"}
-        for i, ticker in enumerate(tickers, start=1):
-            params[f"FID_INPUT_ISCD_{i}"] = ticker
-            params[f"FID_COND_MRKT_DIV_CODE_{i}"] = "J"
-        raw = ctx.kis_api.raw_get(
-            "FHKST11300006",
-            "domestic-stock/v1/quotations/intstock-multprice",
-            params,
-            mode="real",
-        )
-        prices = [
-            {
-                "ticker": row.get("inter_shrn_iscd"),
-                "price": _to_float(row.get("inter2_prpr")),
-                "change_pct": _to_float(row.get("prdy_ctrt")),
-                "volume": _to_float(row.get("acml_vol")),
+        try:
+            params = {"FID_COND_MRKT_DIV_CODE_1": "J"}
+            for i, ticker in enumerate(tickers, start=1):
+                params[f"FID_INPUT_ISCD_{i}"] = ticker
+                params[f"FID_COND_MRKT_DIV_CODE_{i}"] = "J"
+            raw = ctx.kis_api.raw_get(
+                "FHKST11300006",
+                "domestic-stock/v1/quotations/intstock-multprice",
+                params,
+                mode="real",
+            )
+            prices = [
+                {
+                    "ticker": row.get("inter_shrn_iscd"),
+                    "price": _to_float(row.get("inter2_prpr")),
+                    "change_pct": _to_float(row.get("prdy_ctrt")),
+                    "volume": _to_float(row.get("acml_vol")),
+                    "source": "KIS",
+                }
+                for row in raw.get("output", [])
+            ]
+            return {"prices": prices, "source": "KIS"}
+        except Exception as kis_exc:
+            if not (ctx.kiwoom_api and ctx.kiwoom_api.available):
+                raise kis_exc
+
+            fallback_prices = []
+            for ticker in tickers:
+                intraday = _fetch_intraday_candles_raw(ctx, ticker)
+                candles = intraday.get("candles", []) or []
+                latest = candles[-1] if candles else {}
+                fallback_prices.append(
+                    {
+                        "ticker": ticker,
+                        "price": _to_float(latest.get("close")),
+                        "change_pct": 0.0,
+                        "volume": _to_float(latest.get("volume")),
+                        "source": "KIWOOM_INTRADAY_REFERENCE",
+                    }
+                )
+
+            return {
+                "prices": fallback_prices,
+                "source": "KIWOOM_INTRADAY_REFERENCE",
+                "reference_only": True,
+                "missing_fields": ["change_pct"],
             }
-            for row in raw.get("output", [])
-        ]
-        return {"prices": prices}
 
     return ctx.cached_call("get_realtime_price", phase, {"tickers": tickers}, fetch)
 
@@ -431,6 +458,9 @@ def get_watchlist_intraday_snapshot(ctx: MILContext, phase: str, tickers: list[s
                 item["latest_candle"] = candles[-1] if candles else None
                 item["recent_candles"] = candles[-10:] if candles else []
                 item["intraday_trend"] = _infer_intraday_trend(candles)
+                if item.get("price", 0.0) <= 0 and item["latest_candle"]:
+                    item["price"] = _to_float(item["latest_candle"].get("close"))
+                    item["price_reference_source"] = "intraday_candle_reference"
             except Exception:
                 item["candle_count"] = 0
                 item["latest_candle"] = None
@@ -815,6 +845,28 @@ def _infer_intraday_trend(candles: list[dict]) -> str:
     return "flat"
 
 
+def _aggregate_intraday_value_bars(candles: list[dict], interval_minutes: int = 10) -> list[dict]:
+    """정규화된 분봉을 interval_minutes 단위 거래대금 바로 합친다."""
+    buckets: dict[str, dict] = {}
+    for candle in candles:
+        raw_time = str(candle.get("time") or "").strip()
+        if len(raw_time) < 4 or not raw_time[:4].isdigit():
+            continue
+        hour = int(raw_time[:2])
+        minute = int(raw_time[2:4])
+        bucket_minute = (minute // interval_minutes) * interval_minutes
+        bucket_key = f"{hour:02d}{bucket_minute:02d}"
+
+        price = _to_float(candle.get("close")) or _to_float(candle.get("open"))
+        volume = _to_float(candle.get("volume"))
+        trading_value = price * volume if price > 0 and volume > 0 else 0.0
+
+        bucket = buckets.setdefault(bucket_key, {"time": bucket_key, "trading_value": 0.0})
+        bucket["trading_value"] += trading_value
+
+    return [buckets[key] for key in sorted(buckets.keys())]
+
+
 def _coerce_market_cap(row: dict) -> float:
     market_cap = _to_float(row.get("market_cap"))
     if market_cap > 0:
@@ -835,23 +887,11 @@ def get_intraday_volume_trend(ctx: MILContext, phase: str, ticker: str) -> dict:
     """
 
     def fetch():
-        raw = ctx.kis_api.raw_get(
-            "FHKST03010230",
-            "domestic-stock/v1/quotations/inquire-time-itemconclusion",
-            {
-                "fid_cond_mrkt_div_code": "J",
-                "fid_input_iscd": ticker,
-                "fid_hour_cls_code": "10",  # 10분봉
-                "fid_pw_data_incu_yn": "N",
-            },
-        )
-        candles = raw.get("output2", []) or []
-        vols = []
-        for c in candles[:10]:
-            v = float(c.get("acml_tr_pbmn") or 0)
-            vols.append(v)
+        intraday = _fetch_intraday_candles_raw(ctx, ticker, full_day=True)
+        candles = intraday.get("candles", []) or []
+        value_bars = _aggregate_intraday_value_bars(candles, interval_minutes=10)
 
-        if len(vols) < 10:
+        if len(value_bars) < 10:
             return {
                 "ticker": ticker,
                 "trend": "STABLE",
@@ -859,10 +899,13 @@ def get_intraday_volume_trend(ctx: MILContext, phase: str, ticker: str) -> dict:
                 "prev_avg_krw": 0,
                 "decline_pct": 0.0,
                 "signal": None,
+                "source": intraday.get("source", "NONE"),
+                "bar_count": len(value_bars),
             }
 
-        recent_avg = sum(vols[:5]) / 5
-        prev_avg = sum(vols[5:10]) / 5
+        vols = [float(bar["trading_value"]) for bar in value_bars[-10:]]
+        prev_avg = sum(vols[:5]) / 5
+        recent_avg = sum(vols[5:10]) / 5
         decline_pct = ((recent_avg - prev_avg) / prev_avg * 100) if prev_avg > 0 else 0.0
 
         if decline_pct <= -40.0:
@@ -885,6 +928,8 @@ def get_intraday_volume_trend(ctx: MILContext, phase: str, ticker: str) -> dict:
             "prev_avg_krw": prev_avg,
             "decline_pct": round(decline_pct, 1),
             "signal": signal,
+            "source": intraday.get("source", "NONE"),
+            "bar_count": len(value_bars),
         }
 
     return ctx.cached_call("get_intraday_volume_trend", phase, {"ticker": ticker}, fetch)

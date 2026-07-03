@@ -17,6 +17,7 @@ watchlist 종목에 **지금 진입할 타이밍인지**, 보유 종목에서 **
 6. **거래대금이 죽은 종목은 빠르게 버려라.** 장중 거래대금이 꺼진 종목을 오래 붙잡고 추가 탐색하지 마라.
 7. **분봉과 수급이 동시에 약할 때만 제외하라.** 둘 중 하나만 약하면 다른 지표로 보완해 판단하라. 분봉 약함 하나만으로 HOLD하지 마라.
 8. **본류 대장주의 재진입 눌림은 늦은 추격과 구분하라.** `role=본류 대장주`이고 `setup=VOLUME_SURGE_LEADER|THEME_CATALYST`이면, 직전 1봉 약화만으로 추격으로 단정하지 마라. `get_intraday_volume_trend`의 최근 평균 거래대금이 직전 평균 대비 유지(대략 70% 이상)되거나 `trend != DECLINING`이면 재진입 가능한 눌림 후보로 남겨라.
+   단, **당일 고가 0.2% 이내 재접근 구간인데 `get_intraday_volume_trend` 수치가 비어 있거나(0) DECLINING이면 BUY보다 HOLD가 우선**이다.
 9. **본류 대장주 예외 confidence를 사용하라.** 일반 BUY는 `risk_guidance.buy_confidence_threshold`를 따르되, `exploration_policy.leader_reentry_confidence_floor`가 있고 후보가 본류 대장주의 재진입 눌림이면 그 하한(예: 65)까지는 검토 가능하다. 단, 후발주/추격매수에는 이 예외를 적용하지 마라.
 10. **HOLD 판단엔 명확한 근거가 필요하다.** "애매하다", "확인이 부족하다"는 이유만으로 HOLD하지 마라. 적극적으로 부정적인 신호가 없다면 낮은 confidence라도 BUY proposal을 내라.
 11. **완벽한 정렬을 기다리다 놓치지 마라.** 본류 또는 서브 대장주가 이미 거래대금과 스토리를 증명했고, 분봉이 무너지지 않았다면 70점대 초반 confidence도 진입 후보가 될 수 있다.
