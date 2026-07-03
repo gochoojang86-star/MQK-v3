@@ -1489,6 +1489,53 @@ def test_run_intraday_v3_disables_leader_reentry_floor_during_risk_off_regime(mo
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] is None
 
 
+def test_run_intraday_v3_disables_leader_reentry_floor_when_live_is_crash_even_if_regime_stale(monkeypatch, tmp_path):
+    """2026-07-03 후속 발견: 레짐 재평가는 09:03/11:03/13:03에만 돈다. 그 사이(예: 10시)
+    장이 실제로 -3% 이상 급락해도 last_regime.json은 09:03의 YELLOW를 그대로 들고 있어
+    _is_risk_off_regime(regime)만으로는 leader_reentry_confidence_floor 예외가 안 꺼진다.
+    매 틱 실시간으로 계산되는 is_crash도 함께 봐야 한다."""
+    import market_intelligence.portfolio as mil_portfolio
+    import market_intelligence.market as mil_market
+
+    monkeypatch.setattr(mil_portfolio, "get_open_positions",
+                         lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl",
+                         lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 10_000_000})
+    monkeypatch.setattr(mil_market, "get_market_context",
+                         lambda ctx, phase: {"kospi_change_pct": -3.36, "kosdaq_change_pct": -4.81, "foreign_net_buy_krw": 0})
+    monkeypatch.setattr(mil_market, "get_intraday_index_candles",
+                         lambda ctx, phase: {"candles": []})
+    monkeypatch.setattr(mil_market, "get_sector_breadth",
+                         lambda ctx, phase: {"market_breadth": {}})
+
+    orch = make_orchestrator(tmp_path)
+    orch._drift_detector = FakeDriftDetector({
+        "drift_judgment": "STABLE", "reason": "no_trigger_fired", "metrics": {}, "triggered": [],
+        "new_status": None, "risk_guidance_delta": {},
+        "drift_state": {"date": "2026-06-09", "last_trigger_time": {}, "today_caution_count": 0, "daily_lite_llm_calls": 0},
+    })
+    orch._trading_agent = FakeTradingAgent({"action": "NO_TRADE", "proposals": [], "reason": "폭락장 관망"})
+
+    # 09:03에 판단된 스테일 YELLOW 레짐 — 그 이후 시장이 실제로 폭락했지만 아직 재평가 전
+    regime = {
+        "status": "YELLOW", "regime": "THEME_MARKET", "confidence": 78,
+        "risk_guidance": {"max_positions": 4, "buy_confidence_threshold": 75,
+                           "risk_per_trade_pct": 0.35, "min_trading_value_krw": 1_000_000_000},
+        "drift_triggers": [], "cooldown_minutes": 60, "max_daily_triggers": 3,
+        "timestamp": "2026-06-09T09:03:00",
+    }
+    (tmp_path / "last_regime.json").write_text(json.dumps(regime), encoding="utf-8")
+    (tmp_path / "watchlist.json").write_text(json.dumps({"watchlist": ["005930"]}), encoding="utf-8")
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    orch.run_intraday_v3()
+
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] is None
+
+
 def test_run_intraday_v3_merges_watchlist_additions(monkeypatch, tmp_path):
     import market_intelligence.portfolio as mil_portfolio
     import market_intelligence.market as mil_market

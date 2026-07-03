@@ -789,7 +789,7 @@ class MQKOrchestratorV3:
 
         context = self._build_context(
             TradingPhase.INTRADAY, regime, drift_judgment,
-            watchlist=watchlist,
+            watchlist=watchlist, is_crash=is_crash,
         )
         # 폭락 감지 정보를 context에 추가
         context["is_crash"] = is_crash
@@ -1538,6 +1538,7 @@ class MQKOrchestratorV3:
         drift_status: str,
         watchlist: list[str],
         risk_guidance_override: dict | None = None,
+        is_crash: bool = False,
     ) -> dict:
         risk_guidance = _static_execution_guidance()
 
@@ -1659,9 +1660,12 @@ class MQKOrchestratorV3:
                     # 71짜리 REVERSAL 재진입(000660)이 정상 문턱(75) 없이 통과됐다. 이
                     # 예외는 "정상 시장에서 강한 대장주 눌림"을 위한 것이지 폭락장 반등
                     # 기대 매수를 위한 것이 아니므로, RISK_OFF에서는 아예 끈다.
+                    # 2026-07-03 후속: 레짐 재평가는 09:03/11:03/13:03에만 돈다 — 그 사이
+                    # 장이 실제로 급락해도 last_regime.json은 stale한 YELLOW를 들고 있을
+                    # 수 있으므로, 레짐 라벨뿐 아니라 매 틱 실시간 is_crash도 함께 본다.
                     "leader_reentry_confidence_floor": (
                         None
-                        if _is_risk_off_regime(regime)
+                        if (_is_risk_off_regime(regime) or is_crash)
                         else max(
                             REGIME_SAFETY_BOUNDS.min_buy_confidence_threshold,
                             float(risk_guidance.get("buy_confidence_threshold", 75.0)) - 5.0,

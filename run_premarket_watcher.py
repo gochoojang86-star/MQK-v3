@@ -116,7 +116,7 @@ def main() -> None:
 def _poll_once(orch, candidates: list[dict], triggered: set) -> None:
     """후보 전체를 한 번 순회하며 진입 조건을 확인하고, 충족 시 즉시 트리거한다."""
     from market_intelligence.stock import get_watchlist_intraday_snapshot
-    from orchestrator_v3 import load_watchlist, save_watchlist
+    from orchestrator_v3 import load_watchlist_entries, save_watchlist
 
     for cand in candidates:
         ticker = cand.get("ticker")
@@ -141,10 +141,19 @@ def _poll_once(orch, candidates: list[dict], triggered: set) -> None:
                     logger.info(f"[premarket_watcher] {ticker} 락 경합 — 다음 폴에서 재시도")
                     continue
                 try:
-                    wl = load_watchlist()
-                    if ticker not in wl:
-                        save_watchlist(wl + [ticker])
-                        logger.info(f"[premarket_watcher] {ticker} watchlist 추가")
+                    wl = load_watchlist_entries()
+                    existing_tickers = {e["ticker"] for e in wl}
+                    if ticker not in existing_tickers:
+                        new_entry = {
+                            "ticker": ticker,
+                            "setup": cand.get("setup", "THEME_CATALYST"),
+                            "theme": cand.get("theme", ""),
+                            "role": cand.get("role", ""),
+                            "reason": cand.get("reason", "premarket_watcher 조건 충족"),
+                            "confidence": 70,
+                        }
+                        save_watchlist(wl + [new_entry])
+                        logger.info(f"[premarket_watcher] {ticker} watchlist 추가 (setup={new_entry['setup']})")
 
                     triggered.add(ticker)
                     _save_triggered(triggered)
