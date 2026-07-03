@@ -125,7 +125,10 @@ def _normalize_reason_code(value: str | None) -> str:
 
 
 def _is_valid_krx_ticker(value: str | None) -> bool:
-    return bool(re.fullmatch(r"\d{6}", str(value or "").strip()))
+    # 6자리 숫자만이 아니라 우선주/특수종목 코드(예: 매드업 "0039P0", 두산퓨얼셀1우 "33626K")도
+    # 포함해야 한다 — 순수 \d{6}였을 때 이런 실존 종목이 SCAN candidate pool에서 통째로
+    # 빠지는 회귀가 발생함(2026-07-03, universe.csv 기준 74개 종목 영향).
+    return bool(re.fullmatch(r"[0-9A-Z]{6}", str(value or "").strip().upper()))
 
 
 def _infer_intraday_top_level_reason_code(action: str, reason: str) -> str:

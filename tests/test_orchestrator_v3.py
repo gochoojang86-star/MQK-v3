@@ -1097,7 +1097,7 @@ def test_run_scan_v3_does_not_backfill_when_llm_explicitly_waits(monkeypatch, tm
     assert result.get("watchlist") == []
 
 
-def test_build_scan_candidate_pool_filters_non_six_digit_codes(monkeypatch, tmp_path):
+def test_build_scan_candidate_pool_filters_malformed_codes_but_keeps_special_codes(monkeypatch, tmp_path):
     import market_intelligence.theme as mil_theme
     import market_intelligence.screening as mil_screening
 
@@ -1106,13 +1106,16 @@ def test_build_scan_candidate_pool_filters_non_six_digit_codes(monkeypatch, tmp_
         "get_top_movers",
         lambda ctx, phase: {
             "trading_value_stock_top": [{"ticker": "000660", "name": "SK하이닉스", "change_pct": 1.2, "trading_value_krw": 100_000_000_000}],
-            "change_rate_top": [{"ticker": "0039P0", "name": "비정상코드", "change_pct": 20.0}],
+            # "0039P0"(매드업) 같은 우선주/특수종목 코드는 6자리 숫자가 아니어도
+            # 실존 티커이므로 pool에 남아야 한다 (2026-07-03 회귀 수정).
+            "change_rate_top": [{"ticker": "0039P0", "name": "매드업", "change_pct": 20.0}],
         },
     )
     monkeypatch.setattr(
         mil_screening,
         "get_attention_rank",
-        lambda ctx, phase: {"kiwoom_viewing_rank": [], "kis_hts_top": ["0193T0", "000660"]},
+        # 진짜 잘못된 값(빈 문자열, 티커 자리에 종목명이 잘못 들어온 경우)만 걸러져야 한다.
+        lambda ctx, phase: {"kiwoom_viewing_rank": [], "kis_hts_top": ["", "SK하이닉스", "000660"]},
     )
     monkeypatch.setattr(mil_screening, "get_program_netbuy_rank", lambda ctx, phase: {"stocks": []})
     monkeypatch.setattr(mil_screening, "get_foreign_institution_rank", lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": []})
@@ -1121,14 +1124,14 @@ def test_build_scan_candidate_pool_filters_non_six_digit_codes(monkeypatch, tmp_
     monkeypatch.setattr(
         mil_theme,
         "get_theme_candidates",
-        lambda ctx, phase: {"candidates": [{"ticker": "0167A0", "name": "비정상테마", "theme_name": "잡테마"}, {"ticker": "000660", "name": "SK하이닉스", "theme_name": "반도체"}]},
+        lambda ctx, phase: {"candidates": [{"ticker": "33626K", "name": "두산퓨얼셀1우", "theme_name": "우선주"}, {"ticker": "000660", "name": "SK하이닉스", "theme_name": "반도체"}]},
     )
     monkeypatch.setattr(mil_screening, "get_sector_investor_flow", lambda ctx, phase: {"sectors": []})
 
     orch = make_orchestrator(tmp_path)
     pool = orch._build_scan_candidate_pool(regime={"status": "YELLOW", "regime": "SIDEWAYS"})
 
-    assert [item["ticker"] for item in pool] == ["000660"]
+    assert set(item["ticker"] for item in pool) == {"000660", "0039P0", "33626K"}
 
 
 def test_run_scan_v3_injects_next_day_prior_into_context(monkeypatch, tmp_path):
