@@ -1442,6 +1442,7 @@ def test_run_intraday_v3_stable_executes_no_trade(monkeypatch, tmp_path):
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["allow_intraday_discovery"] is True
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["volume_trend_use_averages"] is True
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] == 70.0
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["resistance_breakout_allowed"] is True
     saved_drift = json.loads((tmp_path / "drift_state.json").read_text(encoding="utf-8"))
     assert saved_drift["today_caution_count"] == 0
 
@@ -1537,6 +1538,46 @@ def test_run_intraday_v3_disables_leader_reentry_floor_when_live_is_crash_even_i
     orch.run_intraday_v3()
 
     assert orch._trading_agent.calls[0][1]["exploration_policy"]["leader_reentry_confidence_floor"] is None
+
+
+def test_run_intraday_v3_disables_resistance_breakout_during_risk_off_regime(monkeypatch, tmp_path):
+    import market_intelligence.portfolio as mil_portfolio
+    import market_intelligence.market as mil_market
+
+    monkeypatch.setattr(mil_portfolio, "get_open_positions",
+                         lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl",
+                         lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 10_000_000})
+    monkeypatch.setattr(mil_market, "get_market_context",
+                         lambda ctx, phase: {"kospi_change_pct": -7.0, "kosdaq_change_pct": -6.0, "foreign_net_buy_krw": 0})
+    monkeypatch.setattr(mil_market, "get_intraday_index_candles", lambda ctx, phase: {"candles": []})
+    monkeypatch.setattr(mil_market, "get_sector_breadth", lambda ctx, phase: {"market_breadth": {}})
+
+    orch = make_orchestrator(tmp_path)
+    orch._drift_detector = FakeDriftDetector({
+        "drift_judgment": "STABLE", "reason": "no_trigger_fired", "metrics": {}, "triggered": [],
+        "new_status": None, "risk_guidance_delta": {},
+        "drift_state": {"date": "2026-06-09", "last_trigger_time": {}, "today_caution_count": 0, "daily_lite_llm_calls": 0},
+    })
+    orch._trading_agent = FakeTradingAgent({"action": "NO_TRADE", "proposals": [], "reason": "폭락장 관망"})
+
+    regime = {
+        "status": "RED", "regime": "RISK_OFF", "confidence": 90,
+        "risk_guidance": {"max_positions": 4, "buy_confidence_threshold": 75,
+                           "risk_per_trade_pct": 0.35, "min_trading_value_krw": 1_000_000_000},
+        "drift_triggers": [], "cooldown_minutes": 60, "max_daily_triggers": 3,
+        "timestamp": "2026-06-09T08:45:00",
+    }
+    (tmp_path / "last_regime.json").write_text(json.dumps(regime), encoding="utf-8")
+    (tmp_path / "watchlist.json").write_text(json.dumps({"watchlist": ["005930"]}), encoding="utf-8")
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    orch.run_intraday_v3()
+
+    assert orch._trading_agent.calls[0][1]["exploration_policy"]["resistance_breakout_allowed"] is False
 
 
 def test_run_intraday_v3_merges_watchlist_additions(monkeypatch, tmp_path):

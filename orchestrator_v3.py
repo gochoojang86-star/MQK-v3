@@ -1697,6 +1697,7 @@ class MQKOrchestratorV3:
                             float(risk_guidance.get("buy_confidence_threshold", 75.0)) - 5.0,
                         )
                     ),
+                    "resistance_breakout_allowed": not (_is_risk_off_regime(regime) or is_crash),
                 }
                 if phase == TradingPhase.INTRADAY
                 else None
