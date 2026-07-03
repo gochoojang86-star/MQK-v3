@@ -124,6 +124,10 @@ def _normalize_reason_code(value: str | None) -> str:
     return ""
 
 
+def _is_valid_krx_ticker(value: str | None) -> bool:
+    return bool(re.fullmatch(r"\d{6}", str(value or "").strip()))
+
+
 def _infer_intraday_top_level_reason_code(action: str, reason: str) -> str:
     normalized_reason = str(reason or "").strip().lower()
     normalized_action = str(action or "").upper()
@@ -224,6 +228,17 @@ def _sector_theme_matches(theme_hints: list[str], sector_name: str) -> bool:
         if hint_norm and (sector_norm in hint_norm or hint_norm in sector_norm):
             return True
     return False
+
+
+def _should_backfill_scan_result(result: dict, context: dict) -> bool:
+    action = str(result.get("action") or "").upper()
+    if action in {"WAIT", "NO_TRADE"}:
+        premarket_entries = [
+            e for e in (context.get("watchlist") or [])
+            if isinstance(e, dict) and e.get("setup") == "LIMIT_UP_PULLBACK"
+        ]
+        return bool(premarket_entries)
+    return True
 
 
 def _diversify_by_theme(
@@ -651,7 +666,7 @@ class MQKOrchestratorV3:
         result = self._trading_agent.run(TradingPhase.SCAN, context)
         self._record_tool_request(result, TradingPhase.SCAN, regime)
         self._alert_on_tool_failures(result, TradingPhase.SCAN)
-        if not result.get("watchlist"):
+        if not result.get("watchlist") and _should_backfill_scan_result(result, context):
             result = self._backfill_scan_result(result, context)
         else:
             result = self._apply_scan_diversity_guard(result, context)
@@ -1265,6 +1280,8 @@ class MQKOrchestratorV3:
         pool: dict[str, dict] = {}
 
         def _entry(ticker: str, name: str | None = None) -> dict:
+            if not _is_valid_krx_ticker(ticker):
+                return {}
             item = pool.setdefault(ticker, {
                 "ticker": ticker,
                 "name": name or "",
@@ -1294,7 +1311,7 @@ class MQKOrchestratorV3:
             movers = mil_screening.get_top_movers(self._mil, phase)
             for idx, row in enumerate((movers.get("trading_value_stock_top") or [])[:40], start=1):
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["trading_value_rank"] = idx
@@ -1305,7 +1322,7 @@ class MQKOrchestratorV3:
             # (전선/전력처럼 대형주 섹터에 묻혀 거래대금 순위가 낮게 나오는 종목 커버)
             for idx, row in enumerate((movers.get("change_rate_top") or [])[:20], start=1):
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 if item["facts"]["change_pct"] is None:
@@ -1318,14 +1335,14 @@ class MQKOrchestratorV3:
             attention = mil_screening.get_attention_rank(self._mil, phase)
             for row in (attention.get("kiwoom_viewing_rank") or [])[:30]:
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["attention_rank"] = row.get("rank")
                 item["why_in_pool"].append("attention_rank")
             for idx, ticker in enumerate((attention.get("kis_hts_top") or [])[:30], start=1):
                 code = str(ticker or "").strip()
-                if not code:
+                if not _is_valid_krx_ticker(code):
                     continue
                 item = _entry(code)
                 if item["facts"]["attention_rank"] is None:
@@ -1338,7 +1355,7 @@ class MQKOrchestratorV3:
             program = mil_screening.get_program_netbuy_rank(self._mil, phase)
             for idx, row in enumerate((program.get("stocks") or [])[:20], start=1):
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["program_netbuy_rank"] = idx
@@ -1352,14 +1369,14 @@ class MQKOrchestratorV3:
             fi = mil_screening.get_foreign_institution_rank(self._mil, phase)
             for row in (fi.get("foreign_netbuy_top") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["foreign_netbuy"] = True
                 item["why_in_pool"].append("foreign_netbuy")
             for row in (fi.get("institution_netbuy_top") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["institution_netbuy"] = True
@@ -1371,7 +1388,7 @@ class MQKOrchestratorV3:
             cont = mil_screening.get_foreign_continuous_rank(self._mil, phase)
             for idx, row in enumerate((cont.get("stocks") or [])[:20], start=1):
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["foreign_continuous_rank"] = idx
@@ -1383,7 +1400,7 @@ class MQKOrchestratorV3:
             surge = mil_screening.get_volume_surge(self._mil, phase)
             for row in (surge.get("stocks") or [])[:20]:
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 item["facts"]["volume_surge"] = True
@@ -1397,7 +1414,7 @@ class MQKOrchestratorV3:
             themes = mil_theme.get_theme_candidates(self._mil, phase)
             for row in (themes.get("candidates") or [])[:40]:
                 ticker = str(row.get("ticker") or "").strip()
-                if not ticker:
+                if not _is_valid_krx_ticker(ticker):
                     continue
                 item = _entry(ticker, row.get("name"))
                 hint = str(row.get("theme_name") or row.get("group_name") or "").strip()
@@ -2650,9 +2667,12 @@ class MQKOrchestratorV3:
 
         reviews = []
         for trade in today_trades:
-            review = self._review_agent.analyze(trade)
-            reviews.append(review)
-            logger.info(f"복기: {review.ticker} {review.result} {review.pnl_pct:+.2f}%")
+            try:
+                review = self._review_agent.analyze(trade)
+                reviews.append(review)
+                logger.info(f"복기: {review.ticker} {review.result} {review.pnl_pct:+.2f}%")
+            except Exception as e:
+                logger.warning(f"[V3 장마감] 거래 복기 실패 — 다음 거래 계속: {e}")
 
     def run_self_improvement_review(
         self,

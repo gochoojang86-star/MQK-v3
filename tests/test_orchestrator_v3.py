@@ -687,6 +687,11 @@ class FakeSelfImprovementAgent:
         return list(self._proposals)
 
 
+class RaisingReviewAgent:
+    def analyze(self, trade):
+        raise ValueError("review llm failed")
+
+
 class FakeImprovementManager:
     def __init__(self):
         self.saved = []
@@ -1055,6 +1060,77 @@ def test_run_scan_v3_keeps_monitoring_watchlist_when_positions_full(monkeypatch,
     assert saved == ["357780"]
 
 
+def test_run_scan_v3_does_not_backfill_when_llm_explicitly_waits(monkeypatch, tmp_path):
+    import market_intelligence.portfolio as mil_portfolio
+    import market_intelligence.theme as mil_theme
+    import market_intelligence.screening as mil_screening
+
+    monkeypatch.setattr(mil_portfolio, "get_open_positions", lambda ctx, phase: {"positions": [], "position_count": 0})
+    monkeypatch.setattr(mil_portfolio, "get_daily_pnl", lambda ctx, phase: {"realized_pnl_pct": 0.0, "realized_pnl_krw": 0, "total_eval_amt": 10_000_000})
+    monkeypatch.setattr(mil_theme, "get_theme_candidates", lambda ctx, phase: {"candidates": [{"ticker": "005930", "name": "삼성전자", "theme_name": "반도체"}]})
+    monkeypatch.setattr(mil_screening, "get_top_movers", lambda ctx, phase: {"change_rate_top": [{"ticker": "005930", "name": "삼성전자", "change_pct": 3.3, "trading_value_krw": 500_000_000_000}], "overheated_bias_warning": False})
+
+    orch = make_orchestrator(tmp_path)
+    orch._trading_agent = FakeTradingAgent({
+        "next_action": "final",
+        "action": "WAIT",
+        "watchlist": [],
+        "candidates": [],
+        "reason": "고신뢰 본류 대장주 등재보다 WAIT가 우선",
+    })
+
+    regime = {
+        "status": "YELLOW", "regime": "SIDEWAYS", "confidence": 50,
+        "risk_guidance": {"max_positions": 4, "buy_confidence_threshold": 75,
+                           "risk_per_trade_pct": 0.35, "min_trading_value_krw": 12_000_000_000},
+        "timestamp": "2026-06-09T08:45:00",
+    }
+    (tmp_path / "last_regime.json").write_text(json.dumps(regime), encoding="utf-8")
+
+    monkeypatch.setattr("orchestrator_v3._LAST_REGIME_PATH", tmp_path / "last_regime.json")
+    monkeypatch.setattr("orchestrator_v3._DRIFT_STATE_PATH", tmp_path / "drift_state.json")
+    monkeypatch.setattr("orchestrator_v3._WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+    result = orch.run_scan_v3()
+
+    assert result["action"] == "WAIT"
+    assert result.get("watchlist") == []
+
+
+def test_build_scan_candidate_pool_filters_non_six_digit_codes(monkeypatch, tmp_path):
+    import market_intelligence.theme as mil_theme
+    import market_intelligence.screening as mil_screening
+
+    monkeypatch.setattr(
+        mil_screening,
+        "get_top_movers",
+        lambda ctx, phase: {
+            "trading_value_stock_top": [{"ticker": "000660", "name": "SK하이닉스", "change_pct": 1.2, "trading_value_krw": 100_000_000_000}],
+            "change_rate_top": [{"ticker": "0039P0", "name": "비정상코드", "change_pct": 20.0}],
+        },
+    )
+    monkeypatch.setattr(
+        mil_screening,
+        "get_attention_rank",
+        lambda ctx, phase: {"kiwoom_viewing_rank": [], "kis_hts_top": ["0193T0", "000660"]},
+    )
+    monkeypatch.setattr(mil_screening, "get_program_netbuy_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_institution_rank", lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_continuous_rank", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(mil_screening, "get_volume_surge", lambda ctx, phase: {"stocks": []})
+    monkeypatch.setattr(
+        mil_theme,
+        "get_theme_candidates",
+        lambda ctx, phase: {"candidates": [{"ticker": "0167A0", "name": "비정상테마", "theme_name": "잡테마"}, {"ticker": "000660", "name": "SK하이닉스", "theme_name": "반도체"}]},
+    )
+    monkeypatch.setattr(mil_screening, "get_sector_investor_flow", lambda ctx, phase: {"sectors": []})
+
+    orch = make_orchestrator(tmp_path)
+    pool = orch._build_scan_candidate_pool(regime={"status": "YELLOW", "regime": "SIDEWAYS"})
+
+    assert [item["ticker"] for item in pool] == ["000660"]
+
+
 def test_run_scan_v3_injects_next_day_prior_into_context(monkeypatch, tmp_path):
     import market_intelligence.portfolio as mil_portfolio
 
@@ -1276,6 +1352,18 @@ def test_run_market_close_v3_runs_self_improvement_without_closed_trades(monkeyp
     saved_review = _json.loads((tmp_path / "self_improvement_review.json").read_text(encoding="utf-8"))
     assert saved_review["proposal_count"] == 1
     assert saved_review["proposals"][0]["title"] == "놓친 종목 분석 기반 스캔 강화"
+
+
+def test_run_close_review_ignores_single_review_failure(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    orch._review_agent = RaisingReviewAgent()
+    orch._journal = type("J", (), {
+        "get_closed_trades": lambda self, days=1: [{
+            "ticker": "005930", "entry_price": 100, "exit_price": 110, "quantity": 1
+        }]
+    })()
+
+    orch.run_close_review()
 
 
 def test_run_self_improvement_review_saves_empty_summary_when_no_proposals(tmp_path):

@@ -8,12 +8,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import logging
 
 from config.settings import ModelTier, LOG_CONFIG
 from llm.client import LLMClient
 from llm.soul import inject_agent
 
 _SYSTEM_PROMPT = inject_agent("review_agent")
+logger = logging.getLogger("mqk_v3")
 
 
 @dataclass
@@ -57,10 +59,16 @@ class ReviewAgent:
 
 이 거래를 복기하고 마크다운 형식으로 출력하세요."""
 
-        markdown = self._llm.call(
-            system=_SYSTEM_PROMPT, user=user_msg,
-            tier=ModelTier.FAST, expect_json=False
-        )
+        try:
+            markdown = self._llm.call(
+                system=_SYSTEM_PROMPT, user=user_msg,
+                tier=ModelTier.FAST, expect_json=False
+            )
+            if not isinstance(markdown, str):
+                markdown = str(markdown)
+        except Exception as e:
+            logger.warning(f"[review_agent] LLM 복기 생성 실패 — deterministic fallback 사용: {e}")
+            markdown = self._fallback_markdown(trade_record, result, pnl, pnl_pct)
 
         review = TradeReview(
             ticker=trade_record.get("ticker", ""),
@@ -73,12 +81,27 @@ class ReviewAgent:
         self._write_journal(review)
         return review
 
+    def _fallback_markdown(self, trade_record: dict[str, Any], result: str, pnl: float, pnl_pct: float) -> str:
+        return (
+            "### 요약\n"
+            f"- 결과: {result}\n"
+            f"- 손익: {pnl:+,.0f}원 ({pnl_pct:+.2f}%)\n\n"
+            "### 기록된 근거\n"
+            f"- 진입 근거: {trade_record.get('entry_reason', '') or '기록 없음'}\n"
+            f"- 청산 근거: {trade_record.get('exit_reason', '') or '기록 없음'}\n\n"
+            "### 메모\n"
+            "- LLM 복기 생성 실패로 기본 복기 템플릿을 저장함.\n"
+        )
+
     def _write_journal(self, review: TradeReview) -> None:
-        today = datetime.now().strftime("%Y-%m-%d")
-        log_dir = self._log_dir / today
-        log_dir.mkdir(parents=True, exist_ok=True)
-        journal_path = log_dir / LOG_CONFIG.journal_filename
-        with journal_path.open("a", encoding="utf-8") as f:
-            f.write(f"\n## {review.trade_date} | {review.ticker} | {review.result} ({review.pnl_pct:+.2f}%)\n\n")
-            f.write(review.markdown)
-            f.write("\n\n---\n")
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            log_dir = self._log_dir / today
+            log_dir.mkdir(parents=True, exist_ok=True)
+            journal_path = log_dir / LOG_CONFIG.journal_filename
+            with journal_path.open("a", encoding="utf-8") as f:
+                f.write(f"\n## {review.trade_date} | {review.ticker} | {review.result} ({review.pnl_pct:+.2f}%)\n\n")
+                f.write(review.markdown)
+                f.write("\n\n---\n")
+        except Exception as e:
+            logger.warning(f"[review_agent] 복기 저널 저장 실패: {e}")

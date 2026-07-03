@@ -10,12 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+import logging
 
 from config.settings import ModelTier
 from llm.client import LLMClient
 from llm.soul import inject_agent
 
 _SYSTEM_PROMPT = inject_agent("self_improvement_agent")
+logger = logging.getLogger("mqk_v3")
 
 
 class ChangeType(str, Enum):
@@ -57,21 +59,12 @@ class SelfImprovementAgent:
 
         stats   = self._compute_stats(trade_history)
         user_msg = self._build_prompt(stats, journal_summary)
-        raw     = self._llm.call(system=_SYSTEM_PROMPT, user=user_msg, tier=ModelTier.FAST)
-
-        proposals = []
-        for p in raw.get("improvement_proposals", [])[:5]:
-            proposals.append(ImprovementProposal(
-                title=p["title"],
-                hypothesis=p.get("hypothesis", ""),
-                change_type=ChangeType(p["change_type"]),
-                expected_effect=p.get("expected_effect", ""),
-                risk=p.get("risk", ""),
-                requires_backtest=p.get("requires_backtest", True),
-                settings_patch=p.get("settings_patch", []),
-                auto_apply=False,  # 절대 자동 반영 금지
-            ))
-        return proposals
+        try:
+            raw = self._llm.call(system=_SYSTEM_PROMPT, user=user_msg, tier=ModelTier.FAST)
+        except Exception as e:
+            logger.warning(f"[self_improvement_agent] 개선안 생성 실패: {e}")
+            return []
+        return self._parse_proposals(raw)
 
     def suggest_from_reflection(
         self,
@@ -89,20 +82,40 @@ class SelfImprovementAgent:
             market_close_snapshot or {},
             tool_gap_summary or {},
         )
-        raw = self._llm.call(system=_SYSTEM_PROMPT, user=user_msg, tier=ModelTier.FAST)
+        try:
+            raw = self._llm.call(system=_SYSTEM_PROMPT, user=user_msg, tier=ModelTier.FAST)
+        except Exception as e:
+            logger.warning(f"[self_improvement_agent] reflection 개선안 생성 실패: {e}")
+            return []
         return self._parse_proposals(raw)
 
     def _parse_proposals(self, raw: dict[str, Any]) -> list[ImprovementProposal]:
         proposals = []
+        if not isinstance(raw, dict):
+            return proposals
         for p in raw.get("improvement_proposals", [])[:5]:
+            if not isinstance(p, dict):
+                continue
+            title = str(p.get("title") or "").strip()
+            change_type_raw = str(p.get("change_type") or "").strip()
+            if not title or not change_type_raw:
+                continue
+            try:
+                change_type = ChangeType(change_type_raw)
+            except ValueError:
+                logger.warning(f"[self_improvement_agent] 알 수 없는 change_type 스킵: {change_type_raw}")
+                continue
+            settings_patch = p.get("settings_patch", [])
+            if not isinstance(settings_patch, list):
+                settings_patch = []
             proposals.append(ImprovementProposal(
-                title=p["title"],
+                title=title,
                 hypothesis=p.get("hypothesis", ""),
-                change_type=ChangeType(p["change_type"]),
+                change_type=change_type,
                 expected_effect=p.get("expected_effect", ""),
                 risk=p.get("risk", ""),
-                requires_backtest=p.get("requires_backtest", True),
-                settings_patch=p.get("settings_patch", []),
+                requires_backtest=bool(p.get("requires_backtest", True)),
+                settings_patch=settings_patch,
                 auto_apply=False,
             ))
         return proposals

@@ -174,19 +174,53 @@ class RegimeAgent:
 
 {weighting}"""
 
-        raw = self._llm.call(system=_SYSTEM_PROMPT, user=user_msg, tier=ModelTier.FAST)
+        try:
+            raw = self._llm.call(system=_SYSTEM_PROMPT, user=user_msg, tier=ModelTier.FAST)
+            return RegimeJudgment(
+                status=MarketStatus(raw["status"]),
+                regime=Regime(raw["regime"]),
+                confidence=int(raw["confidence"]),
+                reason=raw["reason"],
+                risk_notes=raw.get("risk_notes", []),
+                opportunity_mode=OpportunityMode(raw.get("opportunity_mode", "NORMAL")),
+                scanner_mode=ScannerMode(raw.get("scanner_mode", "TREND")),
+                risk_guidance=clamp_risk_guidance(raw.get("risk_guidance", {})),
+                drift_triggers=raw.get("drift_triggers", []),
+                cooldown_minutes=clamp_cooldown_minutes(raw.get("cooldown_minutes", 60)),
+                max_daily_triggers=clamp_max_daily_triggers(raw.get("max_daily_triggers", 3)),
+            )
+        except Exception as e:
+            logger.warning(f"[regime_agent] LLM 판단 실패 — 보수적 폴백 사용: {type(e).__name__}: {e}")
+            return self._fallback_judgment(prev_regime, f"{type(e).__name__}: {e}")
+
+    def _fallback_judgment(self, prev_regime: dict[str, Any] | None, error: str) -> RegimeJudgment:
+        prev_regime = prev_regime or {}
+        try:
+            status = MarketStatus(str(prev_regime.get("status") or ""))
+            regime = Regime(str(prev_regime.get("regime") or ""))
+            reason = "직전 레짐 재사용 (LLM 실패 폴백)"
+            confidence = int(prev_regime.get("confidence", 0) or 0)
+        except Exception:
+            status = MarketStatus.YELLOW
+            regime = Regime.SIDEWAYS
+            reason = "보수적 기본 레짐 사용 (LLM 실패 폴백)"
+            confidence = 0
+
+        risk_notes = list(prev_regime.get("risk_notes") or [])
+        risk_notes.append(f"regime_llm_fallback: {error[:160]}")
+
         return RegimeJudgment(
-            status=MarketStatus(raw["status"]),
-            regime=Regime(raw["regime"]),
-            confidence=int(raw["confidence"]),
-            reason=raw["reason"],
-            risk_notes=raw.get("risk_notes", []),
-            opportunity_mode=OpportunityMode(raw.get("opportunity_mode", "NORMAL")),
-            scanner_mode=ScannerMode(raw.get("scanner_mode", "TREND")),
-            risk_guidance=clamp_risk_guidance(raw.get("risk_guidance", {})),
-            drift_triggers=raw.get("drift_triggers", []),
-            cooldown_minutes=clamp_cooldown_minutes(raw.get("cooldown_minutes", 60)),
-            max_daily_triggers=clamp_max_daily_triggers(raw.get("max_daily_triggers", 3)),
+            status=status,
+            regime=regime,
+            confidence=confidence,
+            reason=reason,
+            risk_notes=risk_notes,
+            opportunity_mode=OpportunityMode.NORMAL,
+            scanner_mode=ScannerMode.TREND,
+            risk_guidance=clamp_risk_guidance({}),
+            drift_triggers=[],
+            cooldown_minutes=60,
+            max_daily_triggers=3,
         )
 
 

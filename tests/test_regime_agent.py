@@ -19,6 +19,14 @@ class FakeLLMClient:
         return self._response
 
 
+class RaisingLLMClient:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def call(self, system, user, tier=None, expect_json=True):
+        raise self.exc
+
+
 def test_judge_extracts_risk_guidance_and_drift_triggers():
     raw = {
         "status": "YELLOW", "regime": "SIDEWAYS", "confidence": 44,
@@ -144,6 +152,30 @@ def test_judge_uses_defaults_for_garbage_cooldown_and_daily_triggers():
 
     assert judgment.max_daily_triggers == 3
     assert judgment.cooldown_minutes == 60
+
+
+def test_judge_falls_back_to_previous_regime_when_llm_fails():
+    agent = RegimeAgent(llm=RaisingLLMClient(ValueError("bad json")))
+    judgment = agent.judge({}, prev_regime={
+        "status": "RED",
+        "regime": "RISK_OFF",
+        "confidence": 91,
+        "risk_notes": ["old note"],
+    })
+
+    assert judgment.status == MarketStatus.RED
+    assert judgment.regime == Regime.RISK_OFF
+    assert judgment.confidence == 91
+    assert any("regime_llm_fallback" in note for note in judgment.risk_notes)
+
+
+def test_judge_uses_conservative_default_when_llm_fails_without_prev_regime():
+    agent = RegimeAgent(llm=RaisingLLMClient(KeyError("status")))
+    judgment = agent.judge({})
+
+    assert judgment.status == MarketStatus.YELLOW
+    assert judgment.regime == Regime.SIDEWAYS
+    assert judgment.risk_guidance["max_positions"] == 1
 
 
 def test_save_and_load_last_regime(tmp_path):
