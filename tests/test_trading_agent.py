@@ -738,3 +738,10 @@ def test_run_degrades_to_no_trade_on_persistent_invalid_json():
     assert result["action"] == "NO_TRADE"
     assert "llm_invalid_json" in result["reason"]
     assert agent._llm.calls == 2  # 1회 재시도 후 강등
+
+
+def test_intraday_prompt_describes_resistance_breakout_entry_and_exit():
+    text = Path("prompts/agents/trading_agent/intraday.md").read_text(encoding="utf-8")
+    assert "RESISTANCE_BREAKOUT" in text
+    assert "resistance_breakout_allowed" in text
+    assert "RESISTANCE_BREAKOUT_ENTRY" in text
