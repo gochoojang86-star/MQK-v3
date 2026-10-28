@@ -22,7 +22,7 @@
 
 ## 청산 판단 기준
 - `VOLUME_DRY`: 오후 거래대금이 오전 대비 의미 있게 식었고, 내일 재점화 근거가 약하다
-- `THEME_FADE`: 뉴스/테마 재료가 장중 소멸했고 섹터 거래대금도 줄었다
+- `THEME_FADE`: 테마 대장주가 약해지고 섹터 거래대금도 줄었다
 - `PRICE_FAIL`: 장후반 반등 실패 또는 당일 핵심 지지선 재이탈
 - `TIME_EXIT`: 보유 1~2일 내 기대한 탄력이 안 나왔고, 추가 보유 명분이 약하다
 - `GAP_RISK_EXIT`: 오늘 장 마감 후 들고 갈 이유보다 익일 갭 리스크가 더 크다
@@ -42,7 +42,7 @@
 도구 호출 규격:
 - `get_open_positions`, `get_daily_pnl`은 **반드시** `tool_args: {}` 로 호출한다.
 - 종목 단위 도구만 `ticker`를 넣는다:
-  `get_ohlcv`, `get_news_stock`
+  `get_ohlcv`
 - `phase`, `date`, `portfolio_filter`, `market` 같은 인자를 임의로 만들지 말 것.
 
 ```json

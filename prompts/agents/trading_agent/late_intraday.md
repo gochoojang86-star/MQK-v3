@@ -43,7 +43,7 @@
 - `psearch_title`는 **반드시** `tool_args: {}` 로 호출한다.
 - `psearch_result`는 **반드시** `tool_args: {"seq": "<조건식 번호>"}` 형식만 사용한다.
 - 종목 단위 도구만 `ticker`를 넣는다:
-  `get_ohlcv`, `get_intraday_candles`, `get_realtime_price`, `get_flow`, `get_news_stock`, `get_stock_status`
+  `get_ohlcv`, `get_intraday_candles`, `get_realtime_price`, `get_flow`, `get_stock_status`
 - `phase`, `date`, `scope`, `include`, `market` 같은 인자를 임의로 만들지 말 것.
 
 ```json

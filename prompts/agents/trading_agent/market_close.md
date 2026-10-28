@@ -7,7 +7,7 @@
 
 ## Inputs (사전주입 컨텍스트)
 - `regime`, `daily_pnl`, `portfolio`
-- **`market_close_data`**: 마감 팩트 스냅샷 (지수/수급/섹터/헤드라인)
+- **`market_close_data`**: 마감 팩트 스냅샷 (지수/수급/섹터)
 - **`daily_reflection`**: 오늘 봇 행동 + 실제 시장 결과 비교 데이터
   - `today_watchlist`: 오늘 봇이 주목한 종목 리스트
   - `actual_top_movers`: 오늘 실제로 크게 오른 종목들 (거래대금 상위 + 양봉)
@@ -75,7 +75,7 @@
     "tomorrow_bias": {"risk_posture": "NORMAL|DEFENSIVE", "scanner_bias": "NORMAL|RELATIVE_STRENGTH_ONLY"},
     "focus_themes": ["내일 주목할 테마·섹터"],
     "intraday_focus": ["내일 장초반 반드시 확인할 섹터/수급 포인트"],
-    "tomorrow_watch_items": ["내일 확인할 이벤트·뉴스·공시"],
+    "tomorrow_watch_items": ["내일 확인할 이벤트·공시"],
     "missed_today": ["오늘 놓쳤는데 내일도 유효할 수 있는 종목"],
     "system_gaps": ["해결이 필요한 시스템 한계"],
     "premarket_entry_candidates": [

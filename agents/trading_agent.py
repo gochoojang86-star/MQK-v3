@@ -47,7 +47,6 @@ TOOL_REGISTRY: dict[str, Callable] = {
     "get_us_market_context": market.get_us_market_context,
     "get_sector_breadth": market.get_sector_breadth,
     "get_intraday_index_candles": market.get_intraday_index_candles,
-    "get_news_market": market.get_news_market,
     "get_theme_candidates": theme.get_theme_candidates,
     "psearch_title": screening.psearch_title,
     "psearch_result": screening.psearch_result,
@@ -69,8 +68,6 @@ TOOL_REGISTRY: dict[str, Callable] = {
     "get_watchlist_intraday_snapshot": stock.get_watchlist_intraday_snapshot,
     "get_intraday_candles": stock.get_intraday_candles,
     "get_flow": stock.get_flow,
-    "get_news_stock": stock.get_news_stock,
-    "search_telegram_news": stock.search_telegram_news,
     "get_fundamentals": stock.get_fundamentals,
     "get_intraday_institutional_flow": stock.get_intraday_institutional_flow,
     "get_orderbook": stock.get_orderbook,
@@ -86,17 +83,17 @@ TOOL_REGISTRY: dict[str, Callable] = {
 PHASE_TOOLS: dict[TradingPhase, list[str]] = {
     TradingPhase.PREMARKET_SEJUK: [
         "get_limit_up_stocks", "get_premarket_movers",
-        "get_news_market", "get_news_stock", "get_ohlcv",
+        "get_ohlcv",
         "get_market_context", "get_sector_investor_flow",
     ],
     TradingPhase.PREMARKET: [
         "get_market_context", "get_us_market_context",
         "get_sector_breadth", "get_intraday_index_candles",
-        "get_news_market", "get_event_schedule", "get_ohlcv", "get_flow",
+        "get_event_schedule", "get_ohlcv", "get_flow",
         "get_premarket_movers", "get_sector_investor_flow",
     ],
     TradingPhase.SCAN: [
-        "get_market_context", "get_sector_breadth", "get_intraday_index_candles", "get_news_market",
+        "get_market_context", "get_sector_breadth", "get_intraday_index_candles",
         "get_theme_candidates",
         "psearch_title", "psearch_result",
         "kw_psearch_title", "kw_psearch_result",
@@ -106,7 +103,7 @@ PHASE_TOOLS: dict[TradingPhase, list[str]] = {
         "get_program_netbuy_rank",
         "get_sector_investor_flow", "get_volume_surge", "get_bid_queue_surge",
         "get_ohlcv", "get_realtime_price", "get_watchlist_intraday_snapshot",
-        "get_flow", "get_stock_status", "get_news_stock", "search_telegram_news", "get_fundamentals",
+        "get_flow", "get_stock_status", "get_fundamentals",
         "get_intraday_institutional_flow", "get_orderbook",
     ],
     TradingPhase.INTRADAY: [
@@ -117,7 +114,7 @@ PHASE_TOOLS: dict[TradingPhase, list[str]] = {
         "get_foreign_institution_rank", "get_program_netbuy_rank", "get_sector_investor_flow",
         "get_volume_surge", "get_bid_queue_surge", "get_intraday_investor_rank",
         "get_ohlcv", "get_realtime_price", "get_watchlist_intraday_snapshot", "get_intraday_candles",
-        "get_flow", "get_intraday_institutional_flow", "get_news_stock", "search_telegram_news", "get_stock_status",
+        "get_flow", "get_intraday_institutional_flow", "get_stock_status",
         "get_orderbook",
         "get_intraday_volume_trend",  # 세력 이탈 감지 (VOLUME_DRY 신호)
     ],
@@ -126,15 +123,15 @@ PHASE_TOOLS: dict[TradingPhase, list[str]] = {
         "kw_psearch_title", "kw_psearch_result",
         "get_top_movers", "get_disparity_rank", "get_attention_rank",
         "get_ohlcv", "get_intraday_candles", "get_realtime_price", "get_watchlist_intraday_snapshot",
-        "get_flow", "get_intraday_institutional_flow", "get_news_stock", "get_stock_status",
+        "get_flow", "get_intraday_institutional_flow", "get_stock_status",
         "get_orderbook",
     ],
     TradingPhase.CLOSE: [
-        "get_market_context", "get_sector_breadth", "get_news_market",
-        "get_ohlcv", "get_open_positions", "get_daily_pnl", "get_news_stock",
+        "get_market_context", "get_sector_breadth",
+        "get_ohlcv", "get_open_positions", "get_daily_pnl",
     ],
     TradingPhase.MARKET_CLOSE: [
-        "get_market_context", "get_sector_breadth", "get_news_market", "get_ohlcv",
+        "get_market_context", "get_sector_breadth", "get_ohlcv",
     ],
 }
 
@@ -222,7 +219,6 @@ _NO_ARG_TOOLS = {
     "get_us_market_context",
     "get_sector_breadth",
     "get_intraday_index_candles",
-    "get_news_market",
     "get_top_movers",
     "get_attention_rank",
     "kw_psearch_title",
@@ -249,8 +245,6 @@ _ALLOWED_TOOL_ARGS: dict[str, set[str]] = {
     "get_watchlist_intraday_snapshot": {"tickers"},
     "get_intraday_candles": {"ticker", "force_refresh"},
     "get_flow": {"ticker"},
-    "get_news_stock": {"ticker"},
-    "search_telegram_news": {"query", "hours", "limit"},
     "get_fundamentals": {"ticker"},
     "get_intraday_institutional_flow": {"ticker"},
     "get_stock_status": {"ticker"},
@@ -394,7 +388,7 @@ class TradingAgent:
                             "error": "tool_call_required",
                             "instruction": (
                                 "도구 호출 없이 SCAN 최종 판단 금지. "
-                                "반드시 get_market_context 또는 get_news_market 중 하나를 먼저 호출하고, "
+                                "반드시 get_market_context를 먼저 호출하고, "
                                 "가능하면 get_top_movers 또는 get_volume_surge로 후보를 검증하라. "
                                 "도구 호출 형식: {\"next_action\": \"call_tool\", "
                                 "\"tool\": \"get_market_context\", \"tool_args\": {}}"

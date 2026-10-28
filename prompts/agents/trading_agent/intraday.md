@@ -32,7 +32,6 @@ watchlist 종목에 **지금 진입할 타이밍인지**, 보유 종목에서 **
 | 기관·외인 동향 | `get_flow(ticker)` / `get_intraday_institutional_flow` |
 | 시장 전체 강도·지수 등락 | `get_market_context` |
 | 섹터 수급 교차 확인 | `get_sector_investor_flow` |
-| 종목 뉴스 | `get_news_stock(ticker)` |
 
 ### `get_watchlist_intraday_snapshot` 응답 필드
 
@@ -82,7 +81,7 @@ resistance     저항선 fact {resistance_20d_high, round_figure_price, is_break
 |------|------|---------|
 | VOLUME_DRY | 최근 3봉 거래대금 평균 -40% 이하 | 다음날 시가 |
 | FLOW_REVERSAL | 기관+외인 동시 순매도 2일 연속 | 당일 |
-| THEME_FADE | 테마 뉴스 소멸 + 섹터 거래대금 감소 | 다음날 시가 |
+| THEME_FADE | 테마 대장주 약화 + 섹터 거래대금 감소 | 다음날 시가 |
 | PRICE_SIGNAL | `day_low` 하향돌파 + 해당봉 거래대금 ≥ 직전 10봉 평균 2배 **또는** RESISTANCE_BREAKOUT 포지션이 돌파했던 저항선(`resistance_20d_high`/`round_figure_price`) 아래로 분봉 종가 재이탈 | 즉시 |
 | LIMIT_UP_FAIL | 상한가 근접 후 밀리며 거래대금 폭발 | 즉시 |
 | REVERSAL_PROFIT | 목표(+5~8%) 달성 or 반등 후 거래대금 급감 | 당일/익일 시가 |

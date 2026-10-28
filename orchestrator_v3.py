@@ -710,9 +710,6 @@ class MQKOrchestratorV3:
 
         context["volume_surge_candidates"] = surge_candidates
 
-        # 종목 뉴스 사전 주입 — pool 상위 우선순위 구간 종목의 뉴스를 코드가 수집해 facts에 embed.
-        # LLM이 get_news_stock을 건너뛰더라도 촉매 판단 근거가 context에 이미 존재한다.
-        self._prefetch_pool_news(context["candidate_pool"])
         self._prefetch_pool_resistance(context["candidate_pool"])
 
         result = self._trading_agent.run(TradingPhase.SCAN, context)
@@ -1221,12 +1218,6 @@ class MQKOrchestratorV3:
         except (ToolFailure, Exception) as e:
             logger.warning(f"[MARKET_CLOSE] 업종 브레드스 수집 실패: {e}")
             missing.append("sector_breadth")
-        try:
-            news = mil_market.get_news_market(self._mil, TradingPhase.MARKET_CLOSE.value)
-            snapshot["headlines"] = news.get("headlines", [])[:15]
-        except (ToolFailure, Exception) as e:
-            logger.warning(f"[MARKET_CLOSE] 뉴스 수집 실패: {e}")
-            missing.append("news")
         snapshot["data_quality"] = {"missing_fields": missing}
         return snapshot
 
@@ -1248,17 +1239,6 @@ class MQKOrchestratorV3:
         except Exception as e:
             logger.warning(f"[SCAN BRIEF] market_context 실패: {e}")
             missing.append("market_context")
-
-        try:
-            news = mil_market.get_news_market(self._mil, phase)
-            brief["headlines"] = [
-                str(item.get("title") or "")
-                for item in (news.get("headlines") or [])[:5]
-                if str(item.get("title") or "").strip()
-            ]
-        except Exception as e:
-            logger.warning(f"[SCAN BRIEF] news_market 실패: {e}")
-            missing.append("news_market")
 
         try:
             themes = mil_theme.get_theme_candidates(self._mil, phase)
@@ -1308,24 +1288,6 @@ class MQKOrchestratorV3:
         except Exception as e:
             logger.warning(f"[SCAN BRIEF] sector_momentum 실패: {e}")
             missing.append("sector_momentum")
-
-        # 텔레그램 무태그 속보 — 특정 종목 미매핑 뉴스를 LLM이 테마 탐색에 활용
-        try:
-            from broker.telegram_news import get_recent_news as _tg_news
-            all_tg = _tg_news(ticker="", hours=4)
-            untagged = [n for n in all_tg if not (n.get("ticker") or "").strip()]
-            brief["telegram_untagged"] = [
-                {
-                    "title": (n.get("title") or "")[:120],
-                    "source": n.get("source"),
-                    "time": (n.get("date") or "")[11:16],  # HH:MM
-                }
-                for n in untagged[:12]
-                if (n.get("title") or "").strip()
-            ]
-        except Exception as e:
-            logger.debug(f"[SCAN BRIEF] telegram_untagged 수집 실패 (스킵): {e}")
-            brief["telegram_untagged"] = []
 
         if missing:
             brief["data_quality"] = {"missing_fields": missing}
@@ -1548,49 +1510,11 @@ class MQKOrchestratorV3:
         )
         return diversified
 
-    def _prefetch_pool_news(self, pool: list[dict], top_n: int | None = None) -> None:
-        """pool 상위 우선순위 구간 종목의 뉴스를 사전 수집해 facts["news"]에 embed한다.
-
-        LLM이 get_news_stock을 건너뛰더라도 촉매 판단 데이터가 context에 존재하도록 보장.
-        뉴스 수집 실패 시 해당 종목만 스킵 (전체 SCAN 중단 없음).
-        """
-        phase = TradingPhase.SCAN.value
-        if top_n is None:
-            # 후보 풀이 넓어진 뒤에도 상위 8개만 고정 주입하면 정보 밀도가 급격히 떨어진다.
-            # 기본은 상위 12개, 단 pool이 더 작으면 pool 크기까지만 주입한다.
-            top_n = min(len(pool), 12)
-        for item in pool[:top_n]:
-            ticker = item.get("ticker", "")
-            if not ticker:
-                continue
-            try:
-                raw = mil_stock.get_news_stock(self._mil, phase, ticker)
-                telegram = [
-                    (
-                        f"{h.get('title', '')} | {h.get('summary', '')}".strip(" |")
-                    )
-                    for h in (raw.get("telegram_headlines") or [])[:3]
-                    if h.get("title") or h.get("summary")
-                ]
-                naver = [
-                    (
-                        f"{h.get('title', '')} | {h.get('summary', '')}".strip(" |")
-                    )
-                    for h in (raw.get("naver_headlines") or [])[:3]
-                    if h.get("title") or h.get("summary")
-                ]
-                item["facts"]["news"] = {
-                    "telegram": telegram,
-                    "naver": naver,
-                }
-            except Exception as e:
-                logger.debug(f"[SCAN POOL NEWS] {ticker} 뉴스 수집 실패 (스킵): {e}")
-
     def _prefetch_pool_resistance(self, pool: list[dict], top_n: int | None = None) -> None:
         """pool 상위 우선순위 구간 종목의 저항선/라운드피겨 fact를 코드가 미리 계산해 embed한다.
 
-        get_ohlcv 실패는 해당 종목만 스킵 (전체 SCAN 중단 없음). _prefetch_pool_news와
-        동일한 비용 상한 패턴 — 상위 top_n개만 조회.
+        get_ohlcv 실패는 해당 종목만 스킵 (전체 SCAN 중단 없음). 상위 top_n개만 조회하는
+        비용 상한 패턴 — 상위 top_n개만 조회.
         """
         phase = TradingPhase.SCAN.value
         if top_n is None:

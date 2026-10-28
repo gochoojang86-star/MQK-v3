@@ -532,21 +532,6 @@ def test_close_prompt_mentions_gap_risk_and_time_exit():
     assert "TIME_EXIT" in text
 
 
-def test_scan_prompt_includes_brand_to_theme_bridge_rules():
-    text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
-    assert "브랜드명/제품명/서비스명/약물명 브리지 규칙" in text
-    assert "위고비" in text
-    assert "GLP-1" in text
-    assert "기능/적응증/용도" in text
-
-
-def test_scan_prompt_mentions_political_theme_via_telegram_search():
-    text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
-    assert "정치테마/정책테마 동적 판정 규칙" in text
-    assert "search_telegram_news" in text
-    assert "시장이 어떤 서사로 그 종목을 거래하고 있는지" in text
-
-
 def test_scan_prompt_mentions_program_and_trading_value_stock_rank_usage():
     text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
     assert "trading_value_stock_top" in text
@@ -562,12 +547,22 @@ def test_scan_prompt_mentions_candidate_pool_as_primary_input():
     assert "주입된 후보 facts는 이미 1차 검증 입력" in text
 
 
-def test_scan_prompt_does_not_hardcode_top8_news_prefetch():
-    text = Path("prompts/agents/trading_agent/scan.md").read_text(encoding="utf-8")
-    assert "상위 8개 종목" not in text
-    assert "상위 우선순위 구간 종목들" in text
-    assert "뉴스는 참고 자료다" in text
-    assert "등재 자체를 기계적으로 막는 용도가 아니다" in text
+def test_prompts_have_no_news_dependency():
+    for name in ("soul.md", "prompts/agents/regime_agent.md", *[
+        f"prompts/agents/trading_agent/{n}.md"
+        for n in ("premarket_sejuk", "premarket", "scan", "intraday", "late_intraday", "close", "market_close")
+    ]):
+        text = Path(name).read_text(encoding="utf-8")
+        assert "뉴스" not in text, name
+        assert "get_news" not in text, name
+        assert "telegram" not in text.lower(), name
+
+
+def test_news_tools_removed_from_phase_tools():
+    for phase, tools in PHASE_TOOLS.items():
+        assert "get_news_market" not in tools, phase
+        assert "get_news_stock" not in tools, phase
+        assert "search_telegram_news" not in tools, phase
 
 
 def test_scan_prompt_mentions_llm_peer_comparison_within_theme_cluster():
@@ -612,7 +607,7 @@ def test_v3_prompts_treat_regime_as_reference_only():
     close_text = Path("prompts/agents/trading_agent/close.md").read_text(encoding="utf-8")
 
     assert "RED면 전체 스킵" not in premarket_sejuk_text
-    assert "후보 제외/채택은 장전 갭·뉴스·거래대금 연속성으로 결정" in premarket_sejuk_text
+    assert "후보 제외/채택은 장전 갭·시간외 수급·거래대금 연속성으로 결정" in premarket_sejuk_text
     assert "`regime`은 시장 온도 참고용일 뿐" in scan_text
     assert "분봉" in intraday_text and "거래대금" in intraday_text
     assert "실제 청산 여부는 보유 이유 유지 여부, 거래대금, 장후반 가격 실패" in close_text
@@ -844,8 +839,6 @@ def test_scan_fallback_keeps_monitoring_watchlist_when_positions_left_zero(monke
 
 def test_scan_phase_allows_watchlist_intraday_snapshot():
     assert "get_watchlist_intraday_snapshot" in PHASE_TOOLS[TradingPhase.SCAN]
-    assert "search_telegram_news" in PHASE_TOOLS[TradingPhase.SCAN]
-    assert "search_telegram_news" in PHASE_TOOLS[TradingPhase.INTRADAY]
 
 
 def test_psearch_tools_inject_hts_user_id_from_env(monkeypatch):

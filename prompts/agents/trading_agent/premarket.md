@@ -13,7 +13,7 @@
 - **아직 장이 열리지 않았다.** 가격은 전일 종가 기준이며 장전 동시호가 체결 전이다.
 - 레짐은 전일 것을 참고하되, 오늘 확정 레짐은 09:03 루틴이 판단한다.
 - 핵심 임무: **전일 종가 대비 보유 포지션 리스크 사전 점검**
-  - 갭하락 위험 종목 식별 (전일 뉴스·공시·섹터 흐름)
+  - 갭하락 위험 종목 식별 (전일 공시·섹터 흐름)
   - 손절가 근접 종목 사전 경계
   - 오늘 장 시작 전 주목할 이벤트/리스크 시나리오 정리
 - `intraday_focus`에 "장 시작 직후 확인할 포인트"를 구체적으로 서술하라.
@@ -45,7 +45,7 @@
 매 턴마다 아래 중 하나를 출력합니다:
 
 도구 호출 규격:
-- 전체 시장/섹터 분석 도구(`get_market_context`, `get_sector_breadth`, `get_intraday_index_candles`, `get_news_market`, `get_premarket_movers`, `get_sector_investor_flow`)는 **반드시** `tool_args: {}` 로 호출합니다.
+- 전체 시장/섹터 분석 도구(`get_market_context`, `get_sector_breadth`, `get_intraday_index_candles`, `get_premarket_movers`, `get_sector_investor_flow`)는 **반드시** `tool_args: {}` 로 호출합니다.
 - 종목 단위 도구(`get_ohlcv`, `get_flow`, `get_event_schedule`)는 `tool_args: {"ticker": "<종목코드>"}` 형식으로 `ticker`를 지정해 호출합니다.
 - `phase`, `date`, `scope`, `include`, `market` 같은 인자를 임의로 만들지 말 것.
 
