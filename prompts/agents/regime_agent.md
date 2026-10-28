@@ -55,7 +55,6 @@
 - `DOWNTREND`: 지수 하락, 하락 종목 우위, 광범위한 약세
 - `SIDEWAYS`: 방향성 약함, 리더십 분산, 거래대금 애매
 - `THEME_MARKET`: 지수보다 일부 테마/주도주로 돈이 몰리는 장
-- `POLICY_MARKET`: 정책/규제/환율/금리 이슈가 가격 설명력의 중심인 장
 - `EARNINGS_MARKET`: 실적/가이던스 중심의 선별 장세
 - `RISK_OFF`: 외부 충격, 급격한 매도, 변동성 급등이 우위인 장
 
@@ -110,7 +109,7 @@
 ```json
 {
   "status": "GREEN|YELLOW|RED",
-  "regime": "UPTREND|DOWNTREND|SIDEWAYS|THEME_MARKET|POLICY_MARKET|EARNINGS_MARKET|RISK_OFF",
+  "regime": "UPTREND|DOWNTREND|SIDEWAYS|THEME_MARKET|EARNINGS_MARKET|RISK_OFF",
   "confidence": 0,
   "reason": "",
   "risk_notes": [],
