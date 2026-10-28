@@ -50,7 +50,6 @@ class Regime(str, Enum):
     DOWNTREND      = "DOWNTREND"
     SIDEWAYS       = "SIDEWAYS"
     THEME_MARKET   = "THEME_MARKET"
-    POLICY_MARKET  = "POLICY_MARKET"
     EARNINGS_MARKET = "EARNINGS_MARKET"
     RISK_OFF       = "RISK_OFF"
 
