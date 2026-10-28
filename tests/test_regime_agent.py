@@ -154,8 +154,14 @@ def test_judge_uses_defaults_for_garbage_cooldown_and_daily_triggers():
     assert judgment.cooldown_minutes == 60
 
 
-def test_judge_falls_back_to_previous_regime_when_llm_fails():
-    agent = RegimeAgent(llm=RaisingLLMClient(ValueError("bad json")))
+class _QuotaError(Exception):
+    """OpenAI insufficient_quota 오류 모사 (429 + code)."""
+    status_code = 429
+    code = "insufficient_quota"
+
+
+def test_judge_falls_back_to_previous_regime_only_on_credit_exhaustion():
+    agent = RegimeAgent(llm=RaisingLLMClient(_QuotaError("You exceeded your current quota")))
     judgment = agent.judge({}, prev_regime={
         "status": "RED",
         "regime": "RISK_OFF",
@@ -166,16 +172,57 @@ def test_judge_falls_back_to_previous_regime_when_llm_fails():
     assert judgment.status == MarketStatus.RED
     assert judgment.regime == Regime.RISK_OFF
     assert judgment.confidence == 91
+    assert judgment.llm_fallback is True
     assert any("regime_llm_fallback" in note for note in judgment.risk_notes)
 
 
-def test_judge_uses_conservative_default_when_llm_fails_without_prev_regime():
-    agent = RegimeAgent(llm=RaisingLLMClient(KeyError("status")))
+def test_judge_uses_conservative_default_on_credit_exhaustion_without_prev_regime():
+    agent = RegimeAgent(llm=RaisingLLMClient(_QuotaError("quota")))
     judgment = agent.judge({})
 
     assert judgment.status == MarketStatus.YELLOW
     assert judgment.regime == Regime.SIDEWAYS
-    assert judgment.risk_guidance["max_positions"] == 1
+    assert judgment.confidence == 0
+    assert judgment.llm_fallback is True
+
+
+def test_judge_raises_instead_of_fallback_on_non_credit_errors():
+    import pytest
+    from agents.regime_agent import RegimeJudgmentError
+
+    for exc in (ValueError("bad json"), KeyError("status"), TimeoutError("timeout")):
+        agent = RegimeAgent(llm=RaisingLLMClient(exc))
+        with pytest.raises(RegimeJudgmentError):
+            agent.judge({}, prev_regime={"status": "GREEN", "regime": "UPTREND", "confidence": 80})
+
+
+def test_judge_raises_on_invalid_enum_value_from_llm():
+    import pytest
+    from agents.regime_agent import RegimeJudgmentError
+
+    raw = {"status": "GREEN", "regime": "NOT_A_REGIME", "confidence": 50, "reason": "x"}
+    agent = RegimeAgent(llm=FakeLLMClient(raw))
+    with pytest.raises(RegimeJudgmentError):
+        agent.judge({})
+
+
+def test_is_credit_exhausted_error_classification():
+    from llm.client import is_credit_exhausted_error
+
+    class _Err(Exception):
+        def __init__(self, msg="", status_code=None, code=None, body=None):
+            super().__init__(msg)
+            self.status_code = status_code
+            self.code = code
+            self.body = body
+
+    assert is_credit_exhausted_error(_Err(status_code=402))
+    assert is_credit_exhausted_error(_Err(status_code=429, code="insufficient_quota"))
+    assert is_credit_exhausted_error(_Err(body={"error": {"code": "insufficient_quota"}}))
+    assert is_credit_exhausted_error(_Err("You exceeded your current quota, please check your plan"))
+    assert not is_credit_exhausted_error(_Err("Rate limit reached for requests", status_code=429))
+    assert not is_credit_exhausted_error(TimeoutError("timed out"))
+    assert not is_credit_exhausted_error(ValueError("LLM이 유효한 JSON을 반환하지 않았습니다"))
 
 
 def test_save_and_load_last_regime(tmp_path):

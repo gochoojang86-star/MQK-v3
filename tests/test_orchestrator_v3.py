@@ -2902,3 +2902,86 @@ def test_run_scan_v3_calls_prefetch_pool_resistance(monkeypatch, tmp_path):
     orch.run_scan_v3()
 
     assert calls == ["resistance"]
+
+
+def test_alert_regime_failure_notifies_telegram_and_swallows_send_errors(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    sent = []
+    orch._telegram = type("_TG", (), {"notify": lambda self, msg: sent.append(msg)})()
+    orch._alert_regime_failure("레짐 판단 실패 테스트")
+    assert sent and "레짐 판단 실패 테스트" in sent[0]
+
+    def boom(self, msg):
+        raise RuntimeError("telegram down")
+
+    orch._telegram = type("_TG", (), {"notify": boom})()
+    orch._alert_regime_failure("전송 실패해도 예외 없음")  # 예외 전파 금지
+
+
+def _patch_regime_inputs(monkeypatch):
+    import market_intelligence.market as mil_market
+    import market_intelligence.screening as mil_screening
+
+    monkeypatch.setattr(mil_market, "get_market_context", lambda ctx, phase: {
+        "kospi_change_pct": 0.0, "kosdaq_change_pct": 0.0,
+        "kospi_trading_value": 0, "kosdaq_trading_value": 0,
+        "prev_kospi_change_pct": 0.0, "prev_kosdaq_change_pct": 0.0,
+        "prev_kospi_trading_value": 0, "prev_kosdaq_trading_value": 0,
+        "kospi": 2700.0, "kosdaq": 900.0,
+    })
+    monkeypatch.setattr(mil_market, "get_sector_breadth", lambda ctx, phase: {
+        "market_breadth": {"advancers": 0, "decliners": 0}, "sectors": [],
+    })
+    monkeypatch.setattr(mil_market, "get_us_market_context", lambda ctx, phase: {"nasdaq": 1})
+    monkeypatch.setattr(mil_screening, "get_sector_investor_flow",
+                        lambda ctx, phase: {"sectors": [], "missing_fields": []})
+    monkeypatch.setattr(mil_screening, "get_program_netbuy_rank",
+                        lambda ctx, phase: {"stocks": [], "missing_fields": []})
+    monkeypatch.setattr(mil_screening, "get_foreign_institution_rank",
+                        lambda ctx, phase: {"foreign_netbuy_top": [], "institution_netbuy_top": [], "missing_fields": []})
+
+
+def test_evaluate_regime_v3_alerts_and_aborts_on_regime_llm_error(monkeypatch, tmp_path):
+    import pytest
+    from agents.regime_agent import RegimeJudgmentError
+
+    _patch_regime_inputs(monkeypatch)
+    sent = []
+
+    class FailingRegimeAgent:
+        def judge(self, *a, **k):
+            raise RegimeJudgmentError("ValueError: LLM이 유효한 JSON을 반환하지 않았습니다")
+
+    orch = make_orchestrator(tmp_path)
+    orch._regime_agent = FailingRegimeAgent()
+    orch._telegram = type("_TG", (), {"notify": lambda self, msg: sent.append(msg)})()
+
+    with pytest.raises(RegimeJudgmentError):
+        orch._evaluate_regime_v3(now=datetime(2026, 7, 3, 9, 15))
+
+    assert len(sent) == 1 and "레짐 판단 실패" in sent[0]
+
+
+def test_evaluate_regime_v3_alerts_on_credit_fallback(monkeypatch, tmp_path):
+    from agents.regime_agent import RegimeAgent
+
+    _patch_regime_inputs(monkeypatch)
+    sent = []
+
+    class QuotaError(Exception):
+        status_code = 429
+        code = "insufficient_quota"
+
+    class QuotaLLM:
+        def call(self, **k):
+            raise QuotaError("quota")
+
+    orch = make_orchestrator(tmp_path)
+    orch._regime_agent = RegimeAgent(llm=QuotaLLM())
+    orch.warm_atr_cache = lambda: None
+    orch._telegram = type("_TG", (), {"notify": lambda self, msg: sent.append(msg)})()
+
+    orch._evaluate_regime_v3(now=datetime(2026, 7, 3, 9, 15))
+
+    assert orch._last_regime.llm_fallback is True
+    assert any("크레딧 소진" in m for m in sent)

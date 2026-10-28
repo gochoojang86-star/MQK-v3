@@ -19,7 +19,7 @@ from codes.risk_officer import (
     clamp_risk_guidance,
 )
 from config.settings import ModelTier
-from llm.client import LLMClient
+from llm.client import LLMClient, is_credit_exhausted_error
 from llm.soul import inject_agent
 
 logger = logging.getLogger("mqk_v3")
@@ -69,6 +69,12 @@ class RegimeJudgment:
     drift_triggers: list[dict] = field(default_factory=list)
     cooldown_minutes: int = 60
     max_daily_triggers: int = 3
+    # LLM 크레딧 소진으로 직전 레짐을 재사용한 경우에만 True
+    llm_fallback: bool = False
+
+
+class RegimeJudgmentError(RuntimeError):
+    """레짐 LLM 판단 실패 (크레딧 소진 제외). 폴백 없이 호출부에서 중단·알림한다."""
 
 
 class RegimeAgent:
@@ -188,8 +194,13 @@ class RegimeAgent:
                 max_daily_triggers=clamp_max_daily_triggers(raw.get("max_daily_triggers", 3)),
             )
         except Exception as e:
-            logger.warning(f"[regime_agent] LLM 판단 실패 — 보수적 폴백 사용: {type(e).__name__}: {e}")
-            return self._fallback_judgment(prev_regime, f"{type(e).__name__}: {e}")
+            # 레짐은 매매 전반에 영향을 주므로 폴백은 크레딧 소진에만 허용한다.
+            # 그 외(타임아웃·잘못된 JSON·알 수 없는 값 등)는 오류로 올려 알림 후 중단한다.
+            if is_credit_exhausted_error(e):
+                logger.error(f"[regime_agent] LLM 크레딧 소진 — 직전 레짐 폴백: {type(e).__name__}: {e}")
+                return self._fallback_judgment(prev_regime, f"{type(e).__name__}: {e}")
+            logger.error(f"[regime_agent] LLM 판단 실패 — 폴백 없이 중단: {type(e).__name__}: {e}")
+            raise RegimeJudgmentError(f"{type(e).__name__}: {e}") from e
 
     def _fallback_judgment(self, prev_regime: dict[str, Any] | None, error: str) -> RegimeJudgment:
         prev_regime = prev_regime or {}
@@ -219,6 +230,7 @@ class RegimeAgent:
             drift_triggers=[],
             cooldown_minutes=60,
             max_daily_triggers=3,
+            llm_fallback=True,
         )
 
 

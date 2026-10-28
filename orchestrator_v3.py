@@ -20,7 +20,7 @@ from agents.drift_detector import RegimeDriftDetector
 from agents.regime_agent import RegimeAgent
 from agents.review_agent import ReviewAgent
 from agents.self_improvement_agent import SelfImprovementAgent
-from agents.regime_agent import load_last_regime, save_last_regime, _LAST_REGIME_PATH
+from agents.regime_agent import load_last_regime, save_last_regime, _LAST_REGIME_PATH, RegimeJudgmentError
 from agents.trading_agent import TradingAgent, TradingPhase, build_context
 from broker.kis_api import KISApi
 from broker.kiwoom_api import KiwoomApi
@@ -2000,6 +2000,14 @@ class MQKOrchestratorV3:
         except Exception as e:
             logger.warning(f"[드리프트 알림] 텔레그램 발송 실패: {e}")
 
+    def _alert_regime_failure(self, message: str) -> None:
+        """레짐 판단 장애를 텔레그램으로 알린다. 알림 실패가 원 오류를 가리지 않도록 삼킨다."""
+        logger.error(f"[V3 REGIME ALERT] {message}")
+        try:
+            self._telegram.notify(f"🚨 [MQK] {message}")
+        except Exception as e:
+            logger.warning(f"[V3 REGIME ALERT] 텔레그램 전송 실패: {e}")
+
     def _alert_on_tool_failures(self, result: dict, phase: TradingPhase) -> None:
         failures = result.get("tool_failures")
         if not failures:
@@ -2634,12 +2642,26 @@ class MQKOrchestratorV3:
         if evaluation_mode != "OPENING":
             prev_regime_dict = load_last_regime(path=_LAST_REGIME_PATH)
 
-        regime = self._regime_agent.judge(
-            market_ctx,
-            evaluation_mode=evaluation_mode,
-            evaluation_time=now.strftime("%H:%M"),
-            prev_regime=prev_regime_dict,
-        )
+        try:
+            regime = self._regime_agent.judge(
+                market_ctx,
+                evaluation_mode=evaluation_mode,
+                evaluation_time=now.strftime("%H:%M"),
+                prev_regime=prev_regime_dict,
+            )
+        except RegimeJudgmentError as e:
+            self._alert_regime_failure(
+                f"레짐 판단 실패 ({evaluation_mode} {now.strftime('%H:%M')})\n"
+                f"원인: {str(e)[:300]}\n"
+                "조치: 폴백 없이 중단. 레짐 파일은 갱신되지 않았습니다 (당일 레짐이 없으면 매매 스킵)."
+            )
+            raise
+        if getattr(regime, "llm_fallback", False):
+            self._alert_regime_failure(
+                f"LLM 크레딧 소진 — 직전 레짐 재사용 ({evaluation_mode} {now.strftime('%H:%M')})\n"
+                f"재사용 레짐: {regime.regime.value} / {regime.status.value}\n"
+                "크레딧 충전이 필요합니다."
+            )
         self._last_regime = regime
         logger.info(f"[V3] Regime: {regime.regime.value} (확신도 {regime.confidence}%)")
 

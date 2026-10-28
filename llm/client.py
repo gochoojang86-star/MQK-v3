@@ -58,6 +58,37 @@ def _resolve_openrouter_api_key() -> str:
     raise RuntimeError("OpenRouter 인증 수단 없음. OPENROUTER_API_KEY 설정 후 재시도하세요.")
 
 
+_CREDIT_ERROR_CODES = {"insufficient_quota", "billing_hard_limit_reached", "insufficient_credits"}
+_CREDIT_ERROR_PHRASES = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "insufficient credits",
+    "billing_hard_limit",
+    "payment required",
+)
+
+
+def is_credit_exhausted_error(exc: BaseException) -> bool:
+    """LLM 크레딧/쿼터 소진 오류인지 판별한다.
+
+    일반 rate limit(429)·타임아웃·잘못된 응답은 해당하지 않는다.
+    OpenAI: 429 + code=insufficient_quota, OpenRouter: 402.
+    """
+    if getattr(exc, "status_code", None) == 402:
+        return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.lower() in _CREDIT_ERROR_CODES:
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") if isinstance(body.get("error"), dict) else body
+        body_code = err.get("code") or err.get("type")
+        if isinstance(body_code, str) and body_code.lower() in _CREDIT_ERROR_CODES:
+            return True
+    text = str(exc).lower()
+    return any(phrase in text for phrase in _CREDIT_ERROR_PHRASES)
+
+
 class LLMClient:
     """
     OpenAI API 클라이언트.
