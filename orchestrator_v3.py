@@ -2587,7 +2587,6 @@ class MQKOrchestratorV3:
 
         market_context = mil_market.get_market_context(self._mil, TradingPhase.PREMARKET.value)
         breadth_data = mil_market.get_sector_breadth(self._mil, TradingPhase.PREMARKET.value)
-        news_payload = mil_market.get_news_market(self._mil, TradingPhase.PREMARKET.value)
 
         # 국내 투자자별 수급(업종/프로그램/외인·기관) 데이터는 정규장(09:00) 개장 전엔
         # 존재하지 않는다 — API 호출 자체는 성공하지만 모든 수치가 0/빈값으로 돌아와
@@ -2624,11 +2623,6 @@ class MQKOrchestratorV3:
                 "institution_netbuy_top": None,
                 "missing_fields": ["market_not_open_yet"],
             }
-        market_news_summary = " | ".join(
-            str(item.get("title") or "")
-            for item in (news_payload.get("headlines") or [])[:5]
-            if str(item.get("title") or "").strip()
-        ) or "없음"
 
         try:
             sectors = breadth_data.get("sectors", [])
@@ -2658,7 +2652,6 @@ class MQKOrchestratorV3:
             "prev_kosdaq_change_pct": _to_float(market_context.get("prev_kosdaq_change_pct")),
             "prev_kospi_trading_value": _to_float(market_context.get("prev_kospi_trading_value")),
             "prev_kosdaq_trading_value": _to_float(market_context.get("prev_kosdaq_trading_value")),
-            "market_news_summary": market_news_summary,
             "sector_performance": self._sector_performance,
             "premarket_flow": {
                 "data_available": market_is_open,

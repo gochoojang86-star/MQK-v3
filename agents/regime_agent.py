@@ -168,7 +168,6 @@ class RegimeAgent:
 - 코스닥 상승/하락 종목 수: {market_context.get('kosdaq_advancers', 0)} / {market_context.get('kosdaq_decliners', 0)}
 
 [기타]
-- 시장 뉴스 요약: {market_context.get('market_news_summary', '없음')}
 - 섹터 성과: {market_context.get('sector_performance', {})}
 - 장전 수급 데이터: {market_context.get('premarket_flow', {})}
 
