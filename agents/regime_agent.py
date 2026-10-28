@@ -105,7 +105,6 @@ class RegimeAgent:
 [직전 레짐 판단 — 변화 여부 비교 기준]
 - 직전 레짐: {prev_regime.get('regime', '?')} / {prev_regime.get('status', '?')} (확신도 {prev_regime.get('confidence', '?')}%)
 - 직전 판단 시각: {str(prev_regime.get('timestamp', ''))[:16]}
-- 직전 판단 이유 요약: {str(prev_regime.get('reason', ''))[:200]}
 """
 
         if mode == "MIDDAY":
