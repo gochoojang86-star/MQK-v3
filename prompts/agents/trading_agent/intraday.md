@@ -19,8 +19,7 @@ watchlist 종목에 **지금 진입할 타이밍인지**, 보유 종목에서 **
 8. **본류 대장주의 재진입 눌림은 늦은 추격과 구분하라.** `role=본류 대장주`이고 `setup=VOLUME_SURGE_LEADER|THEME_CATALYST`이면, 직전 1봉 약화만으로 추격으로 단정하지 마라. `get_intraday_volume_trend`의 `signal`이 `VOLUME_DRY`가 아니면(`decline_pct > -40`) 재진입 가능한 눌림 후보로 남겨라.
    단, **당일 고가 0.2% 이내 재접근 구간인데 `get_intraday_volume_trend` 수치가 비어 있거나(0) DECLINING이면 BUY보다 HOLD가 우선**이다.
 9. **본류 대장주 예외 confidence를 사용하라.** 일반 BUY는 `risk_guidance.buy_confidence_threshold`를 따르되, `exploration_policy.leader_reentry_confidence_floor`가 있고 후보가 본류 대장주의 재진입 눌림이면 그 하한(예: 65)까지는 검토 가능하다. 단, 후발주/추격매수에는 이 예외를 적용하지 마라.
-10. **HOLD 판단엔 명확한 근거가 필요하다.** "애매하다", "확인이 부족하다"는 이유만으로 HOLD하지 마라. 적극적으로 부정적인 신호가 없다면 낮은 confidence라도 BUY proposal을 내라.
-11. **완벽한 정렬을 기다리다 놓치지 마라.** 본류 또는 서브 대장주가 이미 거래대금과 스토리를 증명했고, 분봉이 무너지지 않았다면 70점대 초반 confidence도 진입 후보가 될 수 있다.
+10. **BUY는 confidence가 기준을 넘을 때만 낸다.** `risk_guidance.buy_confidence_threshold` 미만이면 BUY proposal을 내지 말고 HOLD하라(9번의 본류 대장주 재진입 하한만 예외). 반대로 근거 없이 "애매하다"는 이유만으로 HOLD하지는 마라 — 확신도를 산정한 결과가 기준 미달일 때 HOLD한다.
 
 ## 도구 레퍼런스
 
@@ -67,7 +66,7 @@ resistance     저항선 fact {resistance_20d_high, round_figure_price, is_break
 | LIMIT_UP_PULLBACK | `day_open` 대비 -3~15% 눌림 / 눌림 중 거래대금 유지 (급감 = 세력 이탈, 진입 금지) |
 | VOLUME_SURGE_LEADER / THEME_CATALYST | `day_high` 대비 -3~12% 눌림 / `theme_evidence`가 장중에도 유효 / 같은 테마 내 가장 강한 종목인지 확인 / `get_intraday_volume_trend`의 `signal != VOLUME_DRY`(`decline_pct > -40`)이면 진입 가능 |
 | REVERSAL (폭락장, is_crash=true) | 지수 -3% 폭락일 확인 / `day_low` 대비 +0.5% 이상 반등 봉 / 반등 봉 거래대금 ≥ 직전 하락 봉 |
-| REVERSAL (정상장, is_crash=false) | 본류 대장주 + 거래대금 유지 + 저점 재이탈 없음이 확인되면 진입 가능. confidence 65 이상이면 BUY proposal을 내라. |
+| REVERSAL (정상장, is_crash=false) | 본류 대장주 + 거래대금 유지 + 저점 재이탈 없음이 확인되면 진입 가능. confidence가 `risk_guidance.buy_confidence_threshold` 이상일 때만 BUY proposal을 낸다. |
 | RESISTANCE_BREAKOUT | `resistance.is_breakout_20d_high` 또는 `resistance.is_breakout_round_figure`가 `true` / `resistance.volume_vs_5d_avg_ratio ≥ 2.0` / 돌파 봉이 재이탈 없이 유지 / `exploration_policy.resistance_breakout_allowed=true`일 때만 |
 
 `role=후발주`는 같은 테마의 본류 대장주보다 명확히 강할 때 고려한다. 그렇지 않으면 우선순위에서 제외하라. 본류가 약해진 상황이면 서브 대장주도 진입 검토 대상이다.
@@ -139,4 +138,4 @@ BUY proposal standardized_reason_code:
 - HOLD이면서 BUY proposal 포함
 - stop_loss 없는 BUY proposal
 - REVERSAL (폭락장): 저점 반등 확인 없이 진입
-- "데이터가 애매하다", "확신이 부족하다"는 이유만으로 HOLD — 명확히 부정적 신호가 없으면 BUY
+- confidence가 `risk_guidance.buy_confidence_threshold` 미만인 BUY proposal (예외: 9번의 본류 대장주 재진입 하한)
