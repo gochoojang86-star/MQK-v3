@@ -16,7 +16,7 @@ watchlist 종목에 **지금 진입할 타이밍인지**, 보유 종목에서 **
 5. **본류 대장주가 살아 있으면 후발주에 시간을 낭비하지 마라.** 같은 테마의 본류와 후발이 함께 있으면 본류를 먼저 보고, 후발은 본류가 약해질 때만 검토하라.
 6. **거래대금이 죽은 종목은 빠르게 버려라.** 장중 거래대금이 꺼진 종목을 오래 붙잡고 추가 탐색하지 마라.
 7. **분봉과 수급이 동시에 약할 때만 제외하라.** 둘 중 하나만 약하면 다른 지표로 보완해 판단하라. 분봉 약함 하나만으로 HOLD하지 마라.
-8. **본류 대장주의 재진입 눌림은 늦은 추격과 구분하라.** `role=본류 대장주`이고 `setup=VOLUME_SURGE_LEADER|THEME_CATALYST`이면, 직전 1봉 약화만으로 추격으로 단정하지 마라. `get_intraday_volume_trend`의 최근 평균 거래대금이 직전 평균 대비 유지(대략 70% 이상)되거나 `trend != DECLINING`이면 재진입 가능한 눌림 후보로 남겨라.
+8. **본류 대장주의 재진입 눌림은 늦은 추격과 구분하라.** `role=본류 대장주`이고 `setup=VOLUME_SURGE_LEADER|THEME_CATALYST`이면, 직전 1봉 약화만으로 추격으로 단정하지 마라. `get_intraday_volume_trend`의 `signal`이 `VOLUME_DRY`가 아니면(`decline_pct > -40`) 재진입 가능한 눌림 후보로 남겨라.
    단, **당일 고가 0.2% 이내 재접근 구간인데 `get_intraday_volume_trend` 수치가 비어 있거나(0) DECLINING이면 BUY보다 HOLD가 우선**이다.
 9. **본류 대장주 예외 confidence를 사용하라.** 일반 BUY는 `risk_guidance.buy_confidence_threshold`를 따르되, `exploration_policy.leader_reentry_confidence_floor`가 있고 후보가 본류 대장주의 재진입 눌림이면 그 하한(예: 65)까지는 검토 가능하다. 단, 후발주/추격매수에는 이 예외를 적용하지 마라.
 10. **HOLD 판단엔 명확한 근거가 필요하다.** "애매하다", "확인이 부족하다"는 이유만으로 HOLD하지 마라. 적극적으로 부정적인 신호가 없다면 낮은 confidence라도 BUY proposal을 내라.
@@ -65,7 +65,7 @@ resistance     저항선 fact {resistance_20d_high, round_figure_price, is_break
 | setup | 핵심 확인 사항 |
 |-------|-------------|
 | LIMIT_UP_PULLBACK | `day_open` 대비 -3~15% 눌림 / 눌림 중 거래대금 유지 (급감 = 세력 이탈, 진입 금지) |
-| VOLUME_SURGE_LEADER / THEME_CATALYST | `day_high` 대비 -3~12% 눌림 / `theme_evidence`가 장중에도 유효 / 같은 테마 내 가장 강한 종목인지 확인 / `get_intraday_volume_trend`의 최근 평균 거래대금이 직전 평균 대비 50% 이상 유지되면 진입 가능 |
+| VOLUME_SURGE_LEADER / THEME_CATALYST | `day_high` 대비 -3~12% 눌림 / `theme_evidence`가 장중에도 유효 / 같은 테마 내 가장 강한 종목인지 확인 / `get_intraday_volume_trend`의 `signal != VOLUME_DRY`(`decline_pct > -40`)이면 진입 가능 |
 | REVERSAL (폭락장, is_crash=true) | 지수 -3% 폭락일 확인 / `day_low` 대비 +0.5% 이상 반등 봉 / 반등 봉 거래대금 ≥ 직전 하락 봉 |
 | REVERSAL (정상장, is_crash=false) | 본류 대장주 + 거래대금 유지 + 저점 재이탈 없음이 확인되면 진입 가능. confidence 65 이상이면 BUY proposal을 내라. |
 | RESISTANCE_BREAKOUT | `resistance.is_breakout_20d_high` 또는 `resistance.is_breakout_round_figure`가 `true` / `resistance.volume_vs_5d_avg_ratio ≥ 2.0` / 돌파 봉이 재이탈 없이 유지 / `exploration_policy.resistance_breakout_allowed=true`일 때만 |

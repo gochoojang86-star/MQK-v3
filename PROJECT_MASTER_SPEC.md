@@ -21,6 +21,7 @@
 - `Scan`은 후보 풀을 압축한 뒤 LLM이 동일 테마 내부에서 본류/서브/후발을 해석한다.
 - `Intraday`는 분봉, 거래대금 유지, 수급, 테마 지속성을 기반으로 실제 진입 여부를 판단한다.
 - `Market Close`는 거래 유무와 무관하게 복기와 자기개선 루프를 수행한다.
+- 뉴스는 어떤 phase의 입력에도 사용하지 않는다. 판단 근거는 거래대금, 수급, 섹터/테마 자금 흐름, 분봉이다.
 
 ---
 
@@ -30,8 +31,9 @@
 - `premarket_early`: 08:45
 - `premarket_first`: 08:50
 - `premarket`: 09:03 / 11:03 / 13:03
-- `scan`: 09:17 / 11:17 / 13:17 / 15:00
+- `scan`: 09:17 / 10:17 / 11:17 / 13:17 / 15:00
 - `intraday`: 09:00~14:50, 10분 간격
+- `premarket_close` (마감 직전 레짐 재평가): 15:10
 - `late_intraday`: 15:08 / 15:13
 - `close`: 15:18
 - `market_close`: 17:00
@@ -42,9 +44,9 @@
 
 ## Core State Files
 
-- `data/watchlist.json`
-- `data/last_regime_v3.json`
-- `data/next_day_prior.json`
+- `data/watchlist_v4.json`
+- `data/last_regime_v4.json`
+- `data/next_day_prior_v4.json`
 - `logs/debug/<date>/scan_v3.json`
 - `logs/debug/<date>/daily_reflection.json`
 - `logs/debug/<date>/self_improvement_review.json`

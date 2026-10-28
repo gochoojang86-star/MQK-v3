@@ -72,32 +72,8 @@
    - 스토리 클러스터 내 거래대금 1위인지 확인
    - `get_program_netbuy_rank`와 `get_foreign_institution_rank`에 동시 등장하면 **본류 대장주 가점**
    - `get_attention_rank` 상위에도 반복 등장하면 실제 시장 관심이 붙은 것으로 해석
-5. **폭락일 한정** — REVERSAL 탐색 (구체적 순서 준수):
-
-   **Step A — 패닉셀 후보 추출**
-   `get_top_movers`의 `trading_value_top` 목록에서 `change_pct <= -5%` 종목만 골라라.
-   거래대금 상위이면서 크게 빠진 종목 = 패닉셀이 집중된 종목이다.
-   (d20 이격도 같은 누적 지표 쓰지 말 것 — 당일 낙폭 + 거래대금이 기준)
-
-   **Step B — 섹터 매도 흐름 교차 확인**
-   `get_sector_investor_flow`로 외인 + 기관 동반 대규모 순매도 섹터 확인.
-   가장 많이 팔린 섹터의 거래대금 1위 대장주 → REVERSAL 최우선 후보.
-
-   **Step C — 패닉셀 강도 검증**
-   후보 종목에 대해 `get_ohlcv`로 최근 5일 평균 거래대금 vs 오늘 거래대금 비교.
-   오늘이 5일 평균의 **2배 이상**이면 패닉셀 확정 → REVERSAL로 등재.
-   2배 미만이면 일반 하락이므로 등재 금지.
-
-   **적합/부적합 기준 (REVERSAL 전용 — 폭락일 저점 반등에만 적용, VOLUME_SURGE_LEADER/THEME_CATALYST에는 적용 금지)**
-   - 이 기준이 REVERSAL에만 엄격한 이유: 폭락일 낙주는 유동성이 마르면 저점 반등을 노리다 더 빠지거나
-     물릴 위험이 크다(잡주/유동성 함정). VOLUME_SURGE_LEADER/THEME_CATALYST는 오늘 오르는 종목이라
-     이 위험이 다르므로, 시총·유명도로 배제하지 마라.
-   - 적합: 시총 1조↑ KOSPI 개별 종목, 최근 1개월 내 테마 대장주로 시장 주도한 종목
-     예: 삼성전자(005930), SK하이닉스(000660), 현대차(005380), 기아(000270),
-         삼성SDI(006400), LG에너지솔루션(373220), 삼성바이오로직스(207940) 등
-   - **ETF/레버리지/인버스 제품 절대 금지**: 이름에 KODEX·TIGER·SOL·RISE·KBSTAR·ACE·PLUS 포함된 종목은 개별 주식이 아님 — 등재 금지
-   - 부적합: 스팩·잡주·소형주·처음 보는 종목 — 절대 등재 금지
-   - 아직 하락 중이면 watchlist 등재만 (intraday가 저점 반등 신호 나오면 진입)
+5. **폭락일 한정** — REVERSAL 탐색: 아래 `## REVERSAL 판별 기준`의 Step A→C 순서를 따른다.
+   아직 하락 중이면 watchlist 등재만 한다 (intraday가 저점 반등 신호를 확인하면 진입).
 6. 통과 종목: setup + theme + subtheme + role + evidence 부여
 
 ## 스토리 클러스터 규칙
@@ -150,12 +126,24 @@
 - **세력 신호**: 거래대금 2~3일 연속 증가 OR 오늘 5배↑ + 프로그램/외인·기관 수급 동반
 - **개미 신호**: 오늘만 터짐 + 수급 동반 없음 + 기관/외인 매도 중
 
-## REVERSAL 판별 기준
-- **조건 1 (필수)**: `trading_value_top`에서 `change_pct <= -5%` — 오늘 크게 빠진 대형 유동주
-- **조건 2 (필수)**: 오늘 거래대금 ≥ 최근 5일 평균의 2배 — 패닉셀 볼륨 확인
-- **조건 3 (필수)**: 시총 1조↑ KOSPI 종목 or 최근 1개월 테마 대장주
-- **가짜 하락**: `change_pct > -5%` or 거래대금 2배 미만 → 일반 조정, 등재 금지
-- **절대 금지**: d20 이격도나 스팩/ETF로 탐색하지 말 것 — 당일 낙폭·거래대금이 유일한 기준
+## REVERSAL 판별 기준 (폭락일 한정 — 지수 -3%↓)
+
+**탐색 순서 (순서 준수)**
+- **Step A — 패닉셀 후보**: `get_top_movers`의 `trading_value_top`에서 `change_pct <= -5%` 종목만 추출한다. 거래대금 상위이면서 크게 빠진 종목이 패닉셀 집중 종목이다.
+  d20 이격도 같은 누적 지표·`get_disparity_rank`·스팩/ETF로 탐색하지 마라 — 당일 낙폭과 거래대금이 유일한 기준이다.
+- **Step B — 섹터 교차**: `get_sector_investor_flow`로 외인+기관 동반 대규모 순매도 섹터를 확인한다. 가장 많이 팔린 섹터의 거래대금 1위 대장주가 최우선 후보다.
+- **Step C — 강도 검증**: `get_ohlcv`로 오늘 거래대금을 최근 5일 평균과 비교한다. 2배 이상이면 패닉셀 확정, 2배 미만이면 일반 조정이므로 등재 금지.
+
+**필수 조건**
+- 조건 1: `trading_value_top`에서 `change_pct <= -5%` (가짜 하락: -5% 초과 또는 거래대금 2배 미만 → 등재 금지)
+- 조건 2: 오늘 거래대금 ≥ 최근 5일 평균의 2배
+- 조건 3: 시총 1조↑ KOSPI 종목 또는 최근 1개월 테마 대장주
+
+**적합/부적합 기준 (REVERSAL 전용 — VOLUME_SURGE_LEADER/THEME_CATALYST에는 적용 금지)**
+- 이유: 폭락일 낙주는 유동성이 마르면 반등을 노리다 더 빠지거나 물릴 위험(잡주/유동성 함정)이 크다. 오늘 오르는 종목은 이 위험이 다르므로 시총·유명도로 배제하지 마라.
+- 적합: 시총 1조↑ KOSPI 개별 종목, 최근 1개월 내 테마 대장주 (예: 삼성전자 005930, SK하이닉스 000660, 현대차 005380, 기아 000270, 삼성SDI 006400, LG에너지솔루션 373220, 삼성바이오로직스 207940)
+- **ETF/레버리지/인버스 절대 금지**: 이름에 KODEX·TIGER·SOL·RISE·KBSTAR·ACE·PLUS 포함 종목은 개별 주식이 아님
+- 부적합: 스팩·잡주·소형주·처음 보는 종목 — 절대 등재 금지
 
 ## RESISTANCE_BREAKOUT 판별 기준
 - **대상**: `role=본류 대장주`만. 후발주 돌파는 대상 아님.
@@ -219,8 +207,6 @@ final을 내기 전에 아래 항목을 확인하라. No면 해당 도구를 먼
   100억 미만이라도 테마 초입·호가 집중이 강하면 낮은 confidence 후보로 검토 가능
 - **REVERSAL**: 폭락일(지수 -3%↓)이 아닌데 낙폭과대 등록 금지
 - **REVERSAL**: 처음 보는 소형주·테마 비주류 금지 — 전 대장주만
-- **REVERSAL**: `get_disparity_rank`(d20 이격도)로 탐색 금지 — `trading_value_top`의 `change_pct <= -5%`가 유일한 진입점
-- **REVERSAL**: 오늘 거래대금이 5일 평균 2배 미만이면 등재 금지
 - **RESISTANCE_BREAKOUT**: `facts.resistance.is_breakout_20d_high`도 `is_breakout_round_figure`도 `false`인데 등재 금지
 - **RESISTANCE_BREAKOUT**: `volume_vs_5d_avg_ratio < 2.0`인데 등재 금지
 - **RESISTANCE_BREAKOUT**: risk_off_mode에서 신규 등재 금지
